@@ -1,0 +1,209 @@
+defmodule Fp3Camera do
+  @moduledoc """
+  Stills + live video on the FP3+ rear and front cameras.
+
+  The msm8953 CAMSS subsystem dumps raw 10-bit packed Bayer onto a
+  `/dev/videoN` node; the proprietary phone-camera ISP that handles
+  AE/AWB/AF lives on a Hexagon DSP firmware we don't ship. So images
+  here come straight from the sensor through a NEON-accelerated Bayer
+  demosaic — viewable and sharable, but not tuned like a phone-app
+  capture.
+
+  Two cameras are supported out of the box:
+
+    * `:rear`  — Samsung S5KGM1SP, 48 MP, native 4000×3000 SGRBG10
+    * `:front` — Samsung S5K3P9SP, 16 MP, native 4608×3456 SGRBG10
+
+  ## Quick start
+
+      iex> Fp3Camera.snap(:rear, "/tmp/photo.jpg")
+      {:ok, "/tmp/photo.jpg"}
+
+      iex> {:ok, stream} = Fp3Camera.start_stream(:rear, port: 8080)
+      iex> # open http://nerves.local:8080/ in a browser
+      iex> Fp3Camera.stop_stream(stream)
+      :ok
+  """
+
+  alias Fp3Camera.{Capture, Manager}
+
+  @type camera :: :rear | :front
+
+  @doc """
+  Get the currently-active pipeline defaults — gamma/contrast/saturation
+  /wb etc. — that are merged into every `snap/3` and `start_stream/2`
+  call. Returns a keyword list.
+
+  Empty by default — the binaries' own compile-time defaults (from
+  `cam_pipeline.h`) apply when no overrides are set.
+  """
+  @spec get_defaults() :: keyword()
+  def get_defaults(), do: Application.get_env(:fp3_camera, :defaults, [])
+
+  @doc """
+  Override pipeline defaults at runtime. Merges into existing defaults;
+  pass a key with `nil` to clear it. The merged map is then used for
+  every subsequent `snap/3` and `start_stream/2` (existing streams are
+  unaffected — restart to apply).
+
+  ## Example
+
+      Fp3Camera.set_defaults(gamma: 1.8, saturation: 1.7, wb: {2.0, 1.0, 1.4})
+
+  Keys honoured (same as per-call opts):
+    * `:gamma`, `:contrast`, `:saturation` — tone curve
+    * `:wb` — `{r, g, b}` floats; overrides per-camera WB defaults
+    * `:exposure`, `:gain` — sensor controls
+    * `:bitrate` — H.264 encode bitrate (streams only)
+    * `:denoise`, `:frames`, `:phone_curve` — stills only
+  """
+  @spec set_defaults(keyword()) :: keyword()
+  def set_defaults(opts) when is_list(opts) do
+    current = get_defaults()
+    merged =
+      Keyword.merge(current, opts)
+      |> Enum.reject(fn {_, v} -> is_nil(v) end)
+
+    Application.put_env(:fp3_camera, :defaults, merged)
+    merged
+  end
+
+  @doc "Reset all pipeline defaults back to the binary's compile-time values."
+  @spec reset_defaults() :: :ok
+  def reset_defaults() do
+    Application.put_env(:fp3_camera, :defaults, [])
+    :ok
+  end
+
+  @doc false
+  def with_defaults(opts), do: Keyword.merge(get_defaults(), opts)
+
+  @doc """
+  Configure the media-ctl pipeline for `camera`. Called automatically
+  by `snap/2` and `start_stream/2`; exposed in case you want to set up
+  the pipeline early.
+  """
+  @spec setup(camera()) :: :ok | {:error, term()}
+  def setup(camera), do: Manager.setup(camera)
+
+  @doc """
+  Capture a single still and save it as JPEG at `path`.
+
+  Returns `{:ok, path}` on success.
+
+  ## Options
+
+    * `:quality` — JPEG quality, 1..100 (default `90`)
+    * `:width`, `:height` — output size; if omitted the sensor's
+      native resolution is used (heavy: ~5 MB JPEG at full res). Set
+      e.g. `width: 1280, height: 960` for a normal-sized photo.
+  """
+  @spec snap(camera(), Path.t(), keyword()) :: {:ok, Path.t()} | {:error, term()}
+  def snap(camera, path, opts \\ []),
+    do: Capture.snap(camera, path, with_defaults(opts))
+
+  @doc """
+  Capture a still and return the JPEG as a binary (no file).
+
+  Convenient for downstream processing — Evision, Image, HTTP responses:
+
+      {:ok, jpg} = Fp3Camera.snap_bytes(:rear, focus: :auto)
+      mat = Evision.imdecode(jpg, Evision.Constant.cv_IMREAD_COLOR())
+  """
+  @spec snap_bytes(camera(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def snap_bytes(camera, opts \\ []),
+    do: Capture.snap_bytes(camera, with_defaults(opts))
+
+  @doc """
+  Start a live MJPEG-over-HTTP stream from `camera`. Returns a
+  reference you pass back to `stop_stream/1`.
+
+  Open `http://<device>:<port>/` in any browser, or `curl --output -`
+  it, to view the stream.
+
+  ## Options
+
+    * `:port` — TCP port to listen on (default `8080`)
+    * `:width`, `:height` — output frame size (default `1280×960`)
+    * `:framerate` — target fps (default `15`)
+    * `:quality` — JPEG quality, 1..100 (default `70`)
+  """
+  @spec start_stream(camera(), keyword()) :: {:ok, reference()} | {:error, term()}
+  def start_stream(camera, opts \\ []),
+    do: Capture.start_stream(camera, with_defaults(opts))
+
+  @doc "Stop a stream previously started with `start_stream/2`."
+  @spec stop_stream(reference()) :: :ok
+  def stop_stream(ref), do: Capture.stop_stream(ref)
+
+  @doc """
+  Live-tune a running stream's color pipeline in-place — no restart, no
+  dropped frames. Sends commands over cam-stream's control socket on
+  port `(stream.port + 1)`.
+
+  Honored keys (all match the corresponding `start_stream/2` options):
+
+    * `:wb` — `{r_gain, g_gain, b_gain}` floats; G is implicit 1.0
+    * `:gamma`, `:contrast`, `:saturation`, `:brightness` — floats
+    * `:exposure`, `:gain` — integers; reprogrammed on the sensor subdev
+    * `:focus` — integer 0..1023 (rear only; 0=∞, 1023=macro)
+
+  ## Example
+
+      {:ok, ref} = Fp3Camera.start_stream(:rear, port: 8888)
+      # tweak while watching mpv:
+      Fp3Camera.tune(ref, wb: {1.8, 1.0, 1.4}, gamma: 1.6)
+  """
+  @spec tune(reference(), keyword()) :: :ok | {:error, term()}
+  def tune(ref, opts), do: Capture.tune(ref, opts)
+
+  @doc "List active streams."
+  @spec streams() :: [%{ref: reference(), camera: camera(), port: pos_integer()}]
+  def streams, do: Capture.list_streams()
+
+  @doc """
+  Subscribe to a live NV12 frame feed. Starts a supervised cam-stream
+  in its `--out-nv12` mode and forwards each frame to the calling
+  process as
+
+      {:camera_frame, %{format: :nv12, width: 1920, height: 1080,
+                        camera: :rear, data: <<3.1 MB binary>>}}
+
+  Decode straight to an Evision Mat:
+
+      def handle_info({:camera_frame, %{format: :nv12, width: w,
+                                        height: h, data: nv12}}, state) do
+        # NV12 is laid out as Y plane (h × w) + UV plane (h/2 × w),
+        # which OpenCV sees as a single (h * 1.5) × w u8 Mat.
+        mat = Evision.Mat.from_binary(nv12, {:u, 8}, div(h * 3, 2), w, 1)
+        bgr = Evision.cvtColor(mat, Evision.Constant.cv_COLOR_YUV2BGR_NV12())
+        # … run inference, save, whatever …
+        {:noreply, state}
+      end
+
+  Returns `{:ok, pid}`. Pass that pid to `unsubscribe/1` to stop, or
+  let your subscriber process exit — the Subscriber GenServer monitors
+  the subscriber and shuts the cam-stream Port down automatically.
+
+  Pipeline knobs (`:saturation`, `:gamma`, `:contrast`, `:brightness`,
+  `:wb`, `:exposure`, `:gain`) work the same way as `start_stream/2`.
+  """
+  @spec subscribe(camera(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def subscribe(camera, opts \\ []) do
+    with :ok <- Manager.setup(camera) do
+      opts =
+        with_defaults(opts)
+        |> Keyword.put(:camera, camera)
+        |> Keyword.put(:subscriber, self())
+
+      DynamicSupervisor.start_child(
+        Fp3Camera.StreamSupervisor,
+        {Fp3Camera.Subscriber, opts}
+      )
+    end
+  end
+
+  @doc "Stop a frame subscription previously started with `subscribe/2`."
+  @spec unsubscribe(pid()) :: :ok
+  def unsubscribe(pid) when is_pid(pid), do: Fp3Camera.Subscriber.stop(pid)
+end

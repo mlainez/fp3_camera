@@ -1,0 +1,16 @@
+# Mix
+/_build/
+/cover/
+/deps/
+/doc/
+/.fetch
+
+# Erlang
+erl_crash.dump
+*.ez
+*.tar
+
+# Editor
+.elixir_ls/
+.vscode/
+*.swp
