@@ -28,8 +28,11 @@ defmodule Fp3Camera do
       iex> Fp3Camera.snap(:rear, "/tmp/photo.jpg")
       {:ok, "/tmp/photo.jpg"}
 
-      iex> {:ok, stream} = Fp3Camera.start_stream(:rear, port: 8080)
-      iex> # open http://nerves.local:8080/ in a browser
+      iex> {:ok, stream} = Fp3Camera.start_stream(:rear, port: 8888)
+      iex> # then, from another machine:
+      iex> #   ffplay tcp://nerves.local:8888
+      iex> # This is a raw H.264 stream over TCP, not HTTP -- a browser
+      iex> # cannot open it.
       iex> Fp3Camera.stop_stream(stream)
       :ok
   """
@@ -145,11 +148,20 @@ defmodule Fp3Camera do
     do: Capture.snap_bytes(camera, with_defaults(opts))
 
   @doc """
-  Start a live MJPEG-over-HTTP stream from `camera`. Returns a
+  Start a live H.264 stream from `camera`, served over TCP. Returns a
   reference you pass back to `stop_stream/1`.
 
-  Open `http://<device>:<port>/` in any browser, or `curl --output -`
-  it, to view the stream.
+  It is a raw H.264 elementary stream on a plain TCP socket — not MJPEG
+  and not HTTP, so a browser cannot open it. View it with a player that
+  can demux a bare stream:
+
+      ffplay tcp://<device>:<port>
+      mpv    tcp://<device>:<port>
+      vlc --demux=h264 tcp://<device>:<port>
+
+  The encoder is Venus H.264 at the sensor's binned resolution, capped
+  at 1080p — 1920x1080 on the Fairphone 3+ and on the Fairphone 3's
+  rear camera, less on its 1440x1080 front sensor.
 
   ## Options
 

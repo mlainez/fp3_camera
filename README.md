@@ -35,9 +35,9 @@ Requires a Nerves system with the msm8953 CAMSS driver — see
 # Single frame to JPEG
 {:ok, path} = Fp3Camera.snap(:rear, "/tmp/photo.jpg")
 
-# MJPEG stream over HTTP
-{:ok, _stream} = Fp3Camera.start_stream(:rear, port: 8080)
-# open http://nerves.local:8080/ in a browser
+# Live H.264 stream over TCP (not HTTP — a browser cannot open it)
+{:ok, _stream} = Fp3Camera.start_stream(:rear, port: 8888)
+# then from another machine:  ffplay tcp://nerves.local:8888
 
 # Sensor metadata
 Fp3Camera.info(:rear)
