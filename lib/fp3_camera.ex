@@ -216,6 +216,22 @@ defmodule Fp3Camera do
   def selftest(opts \\ []), do: Fp3Camera.Diagnostics.run(opts)
 
   @doc """
+  Capture, and return what cam-snap measured and decided.
+
+  The raw per-channel means come straight off the sensor and the gains
+  are what the pipeline applied, so white balance can be calibrated as a
+  loop here instead of by copying JPEGs to a laptop:
+
+      iex> {:ok, s} = Fp3Camera.snap_stats(:rear)
+      iex> s.raw
+      %{bayer: "rggb", r: 113.6, g: 146.0, b: 114.1}
+      iex> Fp3Camera.snap_stats(:rear, wb: {s.raw.g / s.raw.r, 1.0, s.raw.g / s.raw.b})
+
+  Accepts every option `snap/3` does, plus `:path`.
+  """
+  defdelegate snap_stats(camera, opts \\ []), to: Capture
+
+  @doc """
   Subscribe to a live NV12 frame feed. Starts a supervised cam-stream
   in its `--out-nv12` mode and forwards each frame to the calling
   process as

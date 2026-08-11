@@ -38,15 +38,41 @@ defmodule Fp3Camera.Capture do
 
   @doc """
   Capture a single JPEG. Blocks until the file is written or `cam-snap`
-  exits. Recognised opts:
+  exits.
 
-    * `:focus` — `:auto` (contrast-detect AF) or 0..1023 (rear only)
-    * `:width`, `:height` — output size; defaults to sensor native
+  Every knob the binary has is reachable from here, so calibrating is a
+  call in IEx rather than a rebuild and a reflash:
+
+  Sensor
+    * `:focus` — `:auto` (contrast-detect sweep) or a 0..1023 VCM DAC
+      value, 0 = infinity, 1023 = macro. Rear only; the front module has
+      no lens actuator.
+    * `:exposure`, `:gain` — raw V4L2 sensor controls. Left alone by
+      default, which is why a dim scene comes out dark: nothing does
+      auto-exposure yet.
+    * `:width`, `:height` — output size; defaults to sensor native.
+
+  White balance
+    * `:awb` — `true` for gray-world from the frame, `false` for the
+      built-in per-slot table.
+    * `:wb` — `{r, g, b}` explicit gains; overrides `:awb`.
+    * `:warm_bias` — extra R multiplier on top of AWB (default 1.05).
+
+  Tone and detail
+    * `:gamma`, `:contrast`, `:saturation`, `:brightness`
+    * `:sharpen` — `false`, `true`, or a float amount
+    * `:denoise` — bilateral strength, 0 disables
+    * `:lsc` — lens shading correction amount, 0 disables
+    * `:auto_levels` — `false` or `{lo, hi}` percentile stretch
+    * `:phone_curve`, `:ccm`, `:mhc` — pipeline variants
+    * `:frames` — average N frames
     * `:quality` — JPEG quality 1..100 (default 90)
-    * `:exposure`, `:gain` — sensor controls
-    * `:saturation`, `:contrast` — color processing knobs
-    * `:phone_curve` — apply the histogram-match LUT (Android-look)
-    * `:denoise`, `:frames` — bilateral strength / multi-frame avg
+
+  Escape hatch
+    * `:args` — a list appended verbatim, for flags newer than this list.
+
+  See `snap_stats/2` to get the measurements back for a closed calibration
+  loop, and `tune/2` to adjust a *running* stream without restarting it.
   """
   def snap(camera, path, opts \\ []) do
     with :ok <- Manager.setup(camera) do
@@ -394,6 +420,9 @@ defmodule Fp3Camera.Capture do
     :ok
   end
 
+  # Every cam-snap knob, so a calibration pass is an IEx call rather than
+  # a Buildroot rebuild, a reflash and a reboot. `:args` is the escape
+  # hatch for anything added to the binary but not yet modelled here.
   defp snap_extras(opts) do
     Enum.flat_map(opts, fn
       {:focus, :auto} -> ["--autofocus"]
@@ -407,13 +436,81 @@ defmodule Fp3Camera.Capture do
       {:contrast, f} -> ["--contrast", to_string(f)]
       {:gamma, f} -> ["--gamma", to_string(f)]
       {:brightness, f} -> ["--exposure-boost", to_string(f)]
+      # White balance. `:awb` is gray-world from the frame; `:wb` is
+      # explicit gains and overrides it; `:no_awb` forces the built-in
+      # per-slot table.
+      {:awb, true} -> ["--awb"]
+      {:awb, false} -> ["--no-awb"]
       {:wb, {r, g, b}} -> ["--wb", to_string(r), to_string(g), to_string(b)]
+      {:warm_bias, f} -> ["--warm-bias", to_string(f)]
+      # Lens shading correction: 0 disables, ~0.4 is the default when a
+      # lens is present.
+      {:lsc, f} -> ["--lsc", to_string(f)]
       {:phone_curve, true} -> ["--phone-curve"]
+      {:ccm, true} -> ["--ccm"]
+      {:mhc, false} -> ["--no-mhc"]
+      {:sharpen, false} -> ["--no-sharpen"]
+      {:sharpen, f} when is_float(f) -> ["--sharpen-amount", to_string(f)]
+      {:sharpen, true} -> ["--sharpen"]
+      {:auto_levels, false} -> ["--no-auto-levels"]
+      {:auto_levels, {lo, hi}} -> ["--auto-levels", to_string(lo), to_string(hi)]
+      {:bayer, b} when is_atom(b) or is_binary(b) -> ["--bayer", to_string(b)]
       {:denoise, n} when is_integer(n) -> ["--denoise", to_string(n)]
       {:frames, n} when is_integer(n) -> ["--frames", to_string(n)]
+      {:args, extra} when is_list(extra) -> Enum.map(extra, &to_string/1)
       _ -> []
     end)
   end
+
+  @doc false
+  # cam-snap reports what it measured and what it decided. Handing that
+  # back makes calibration a closed loop in Elixir — snap, read the raw
+  # channel means, adjust, snap again — instead of copying files to a
+  # host and squinting at them.
+  def snap_stats(camera, opts \\ []) do
+    path =
+      Keyword.get_lazy(opts, :path, fn ->
+        Path.join(System.tmp_dir!(), "fp3_cal_#{:erlang.unique_integer([:positive])}.jpg")
+      end)
+
+    with :ok <- Manager.setup(camera) do
+      args =
+        ["--camera", to_string(camera), "--out", path] ++
+          snap_extras(Keyword.delete(opts, :path))
+
+      case System.cmd(@cam_snap, args, stderr_to_stdout: true) do
+        {out, 0} -> {:ok, Map.put(parse_snap_stats(out), :path, path)}
+        {out, rc} -> {:error, {:cam_snap_failed, rc, out}}
+      end
+    end
+  end
+
+  defp parse_snap_stats(out) do
+    raw =
+      case Regex.run(~r/with bayer=(\w+): R=([\d.]+) G=([\d.]+) B=([\d.]+)/, out) do
+        [_, bayer, r, g, b] ->
+          %{bayer: bayer, r: f(r), g: f(g), b: f(b)}
+
+        _ ->
+          nil
+      end
+
+    gains =
+      case Regex.run(~r/wb gains: R=([\d.]+) G=([\d.]+) B=([\d.]+)/, out) do
+        [_, r, g, b] -> %{r: f(r), g: f(g), b: f(b)}
+        _ -> nil
+      end
+
+    sensor =
+      case Regex.run(~r/cam-snap: sensor (.+)/, out) do
+        [_, s] -> String.trim(s)
+        _ -> nil
+      end
+
+    %{sensor: sensor, raw: raw, gains: gains, output: out}
+  end
+
+  defp f(s), do: String.to_float(if String.contains?(s, "."), do: s, else: s <> ".0")
 
   defp stream_extras(opts) do
     Enum.flat_map(opts, fn
@@ -426,7 +523,10 @@ defmodule Fp3Camera.Capture do
       {:brightness, f} -> ["--brightness", to_string(f)]
       {:focus, n} when is_integer(n) -> ["--focus", to_string(n)]
       {:wb, {r, g, b}} -> ["--wb", to_string(r), to_string(g), to_string(b)]
+      {:fps, n} when is_integer(n) -> ["--fps", to_string(n)]
+      {:focus, :auto} -> ["--autofocus"]
       {:no_autofocus, true} -> ["--no-autofocus"]
+      {:args, extra} when is_list(extra) -> Enum.map(extra, &to_string/1)
       _ -> []
     end)
   end
