@@ -21,6 +21,17 @@ defmodule Fp3Camera.Capture do
   # loop, not a recovery. See handle_info/2 for the exit_status split.
   @min_lifetime_ms 3_000
 
+  # How long start_stream/2 watches a new child before calling it started.
+  # Long enough to catch a bind failure (~130 ms observed), short enough
+  # not to be felt by the caller.
+  @startup_grace_ms 700
+
+  # Teardown budgets. A wedged Venus ioctl will not answer SIGTERM, so
+  # the escalation has to be bounded and then forceful.
+  @term_grace_ms 1_000
+  @kill_grace_ms 1_000
+  @port_free_budget_ms 3_000
+
   # A stream can also fail while staying alive: Venus wedges
   # (`wait for cpu and video core idle fail`) and the process sits there
   # holding its port, serving a client that receives nothing. Exit codes
@@ -179,26 +190,26 @@ defmodule Fp3Camera.Capture do
             ref = make_ref()
             gst_port = open_stream_port(camera, tcp_port, opts)
 
-            info = %{
-              ref: ref,
-              camera: camera,
-              port: tcp_port,
-              port_handle: gst_port,
-              opts: opts,
-              started_at: System.monotonic_time(:millisecond),
-              # Per-spawn, unlike started_at: reset on every respawn so
-              # the crash-loop guard measures this child, not the stream.
-              spawned_at: System.monotonic_time(:millisecond),
-              last_output: [],
-              serving: false,
-              last_progress_at: nil
-            }
+            # Do not report success until the child has survived long
+            # enough to have bound its socket. Returning {:ok, ref}
+            # the instant the Port opens is a lie whenever the port is
+            # already taken: the child dies ~130 ms later on
+            # "bind: Address already in use", the crash-loop guard drops
+            # it from state, and the caller is left holding a ref that
+            # stop_stream/1 then rejects as :not_found. Observed exactly
+            # that, four times in a row, with an orphan holding :8888.
+            case await_start(gst_port) do
+              {:died, status, output} ->
+                Logger.error(
+                  "Fp3Camera: #{camera} stream on tcp/#{tcp_port} failed to start " <>
+                    "(exit #{status}): #{Enum.join(output, " | ")}"
+                )
 
-            Logger.info(
-              "Fp3Camera: stream #{inspect(ref)} from #{camera} on tcp/#{tcp_port} (control tcp/#{tcp_port + 1})"
-            )
+                {:reply, {:error, {:stream_failed, status, output}}, state}
 
-            {:reply, {:ok, ref}, %{state | streams: Map.put(state.streams, ref, info)}}
+              {:started, output} ->
+                start_stream_reply(ref, camera, tcp_port, gst_port, opts, output, state)
+            end
 
           err ->
             {:reply, err, state}
@@ -305,8 +316,9 @@ defmodule Fp3Camera.Capture do
               "after #{lived} ms (exit #{status}), re-spawning"
           )
 
-          # Lets the listening socket leave TIME_WAIT before the re-bind.
-          Process.sleep(250)
+          # Do not guess at TIME_WAIT: wait until bind would actually
+          # succeed, or give up loudly.
+          await_port_free(info.port, @port_free_budget_ms)
 
           new_info = %{
             info
@@ -357,7 +369,7 @@ defmodule Fp3Camera.Capture do
             )
 
             close_stream_port(info.port_handle)
-            Process.sleep(250)
+            await_port_free(info.port, @port_free_budget_ms)
 
             Map.put(acc, ref, %{
               info
@@ -377,6 +389,94 @@ defmodule Fp3Camera.Capture do
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  defp start_stream_reply(ref, camera, tcp_port, gst_port, opts, output, state) do
+    info = %{
+              ref: ref,
+              camera: camera,
+              port: tcp_port,
+              port_handle: gst_port,
+              opts: opts,
+              started_at: System.monotonic_time(:millisecond),
+              # Per-spawn, unlike started_at: reset on every respawn so
+              # the crash-loop guard measures this child, not the stream.
+              spawned_at: System.monotonic_time(:millisecond),
+              last_output: output,
+              serving: false,
+              last_progress_at: nil
+            }
+
+    Logger.info(
+      "Fp3Camera: stream #{inspect(ref)} from #{camera} on tcp/#{tcp_port} (control tcp/#{tcp_port + 1})"
+    )
+
+    {:reply, {:ok, ref}, %{state | streams: Map.put(state.streams, ref, info)}}
+  end
+
+  # Watch the freshly spawned child for @startup_grace_ms. A bind failure
+  # or a camera that will not open shows up well inside that window.
+  defp await_start(port), do: await_start(port, [], System.monotonic_time(:millisecond))
+
+  defp await_start(port, acc, t0) do
+    left = @startup_grace_ms - (System.monotonic_time(:millisecond) - t0)
+
+    if left <= 0 do
+      {:started, Enum.take(acc, -5)}
+    else
+      receive do
+        {^port, {:data, d}} ->
+          lines =
+            d |> String.split(~r/[\r\n]+/, trim: true) |> Enum.map(&String.trim/1)
+
+          await_start(port, acc ++ lines, t0)
+
+        {^port, {:exit_status, st}} ->
+          {:died, st, Enum.take(acc, -5)}
+      after
+        left -> {:started, Enum.take(acc, -5)}
+      end
+    end
+  end
+
+  # True once the pid is gone. /proc is the only honest answer here:
+  # busybox `ps -o args` lists only the calling session's processes,
+  # which is how an orphaned cam-stream once measured as "not running"
+  # while it held :8888 for six minutes.
+  defp await_exit(pid, budget_ms), do: await_exit(pid, budget_ms, 0)
+
+  defp await_exit(_pid, budget, waited) when waited >= budget, do: false
+
+  defp await_exit(pid, budget, waited) do
+    if File.exists?("/proc/#{pid}") do
+      Process.sleep(50)
+      await_exit(pid, budget, waited + 50)
+    else
+      true
+    end
+  end
+
+  # Wait until the port can actually be bound. Testing it directly beats
+  # inferring it from process state: TIME_WAIT, a lingering child or a
+  # stray from an earlier VM all present the same way to cam-stream, and
+  # the only thing that matters is whether bind(2) will succeed.
+  defp await_port_free(tcp_port, budget_ms), do: await_port_free(tcp_port, budget_ms, 0)
+
+  defp await_port_free(tcp_port, budget, waited) when waited >= budget do
+    Logger.warning("Fp3Camera: tcp/#{tcp_port} still busy after #{budget} ms")
+    false
+  end
+
+  defp await_port_free(tcp_port, budget, waited) do
+    case :gen_tcp.listen(tcp_port, [:binary, {:reuseaddr, true}]) do
+      {:ok, sock} ->
+        :gen_tcp.close(sock)
+        true
+
+      {:error, _} ->
+        Process.sleep(50)
+        await_port_free(tcp_port, budget, waited + 50)
+    end
+  end
 
   ## Internals
 
@@ -412,9 +512,19 @@ defmodule Fp3Camera.Capture do
     if Port.info(port) do
       case Port.info(port, :os_pid) do
         {:os_pid, pid} ->
-          # cam-stream listens for SIGTERM via signal handler; send it,
-          # then close the port to clean up file descriptors.
-          System.cmd("kill", ["-TERM", Integer.to_string(pid)])
+          # SIGTERM, then escalate. cam-stream handles SIGTERM and tears
+          # down cleanly, but when Venus wedges it is stuck inside an
+          # ioctl and never gets to the handler — observed as a restart
+          # that immediately hit "bind: Address already in use" because
+          # the corpse still held the socket. Waiting politely is not
+          # enough; something has to insist.
+          System.cmd("kill", ["-TERM", Integer.to_string(pid)], stderr_to_stdout: true)
+
+          unless await_exit(pid, @term_grace_ms) do
+            Logger.warning("Fp3Camera: pid #{pid} ignored SIGTERM, sending SIGKILL")
+            System.cmd("kill", ["-9", Integer.to_string(pid)], stderr_to_stdout: true)
+            await_exit(pid, @kill_grace_ms)
+          end
 
         _ ->
           :ok
