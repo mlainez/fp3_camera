@@ -84,8 +84,11 @@ defmodule Fp3Camera.Diagnostics do
 
     base = %{camera: cam, pass: false}
 
-    with {:ok, info} <- step("detect", fn -> Fp3Camera.info(cam) end),
-         {:ok, _} <- step("setup", fn -> Fp3Camera.setup(cam) end),
+    # setup before detect, not after: info/1 reads the conf that
+    # fp3-cam-setup publishes to /run, so on a fresh boot it answers
+    # :not_configured until the media graph has been walked once.
+    with {:ok, _} <- step("setup", fn -> Fp3Camera.setup(cam) end),
+         {:ok, info} <- step("detect", fn -> Fp3Camera.info(cam) end),
          {:ok, still} <- step("still", fn -> check_still(cam, dir, opts) end),
          {:ok, stream} <- step("stream", fn -> check_stream(cam, secs) end) do
       %{
