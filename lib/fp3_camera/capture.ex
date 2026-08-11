@@ -16,6 +16,19 @@ defmodule Fp3Camera.Capture do
   @cam_snap "/usr/bin/cam-snap"
   @cam_stream "/usr/bin/cam-stream"
 
+  # A child that dies sooner than this never served a client: it failed
+  # to bind, or the camera would not open. Respawning that is a 4 Hz
+  # loop, not a recovery. See handle_info/2 for the exit_status split.
+  @min_lifetime_ms 3_000
+
+  # A stream can also fail while staying alive: Venus wedges
+  # (`wait for cpu and video core idle fail`) and the process sits there
+  # holding its port, serving a client that receives nothing. Exit codes
+  # never catch that, so liveness is judged on cam-stream's own
+  # every-30-frames heartbeat instead.
+  @health_interval_ms 5_000
+  @stall_timeout_ms 10_000
+
   defstruct streams: %{}
 
   ## Public API
@@ -102,7 +115,17 @@ defmodule Fp3Camera.Capture do
   ## GenServer
 
   @impl true
-  def init(_), do: {:ok, %__MODULE__{}}
+  def init(_) do
+    # A cam-stream outlives this VM if the VM went down between spawn and
+    # Port.close — it keeps its TCP port bound, and the next start_stream
+    # then dies on bind for a reason nobody can see from Elixir. Observed
+    # on a running phone: an orphan held :8888 for six minutes and served
+    # a client that connected to it by accident. Reap before we allocate.
+    _ = System.cmd("pkill", ["-TERM", "-f", @cam_stream], stderr_to_stdout: true)
+
+    :timer.send_interval(@health_interval_ms, :health_check)
+    {:ok, %__MODULE__{}}
+  end
 
   @impl true
   def handle_call({:start_stream, camera, opts}, _from, state) do
@@ -128,7 +151,13 @@ defmodule Fp3Camera.Capture do
               port: tcp_port,
               port_handle: gst_port,
               opts: opts,
-              started_at: System.monotonic_time(:millisecond)
+              started_at: System.monotonic_time(:millisecond),
+              # Per-spawn, unlike started_at: reset on every respawn so
+              # the crash-loop guard measures this child, not the stream.
+              spawned_at: System.monotonic_time(:millisecond),
+              last_output: [],
+              serving: false,
+              last_progress_at: nil
             }
 
             Logger.info(
@@ -180,44 +209,159 @@ defmodule Fp3Camera.Capture do
   end
 
   @impl true
-  def handle_info({port, {:data, _line}}, state) when is_port(port) do
-    # cam-stream's stderr is per-30-frame progress; we don't log per line
-    # to keep the journal quiet. Stash if useful in the future.
-    {:noreply, state}
-  end
-
-  def handle_info({port, {:exit_status, status}}, state) when is_port(port) do
-    case Enum.find(state.streams, fn {_, info} -> info.port_handle == port end) do
+  def handle_info({port, {:data, line}}, state) when is_port(port) do
+    # Most of cam-stream's stderr is per-30-frame progress, so it is not
+    # logged line by line. It is kept, though: when the child dies the
+    # last thing it said is the whole diagnosis, and discarding it here
+    # is what hid `bind: Address already in use` behind a respawn loop.
+    case Enum.find(state.streams, fn {_, i} -> i.port_handle == port end) do
       {ref, info} ->
-        # cam-stream's TCP server is single-client by design — when mpv
-        # disconnects it exits cleanly. Respawn the Port so the stream
-        # stays "listening" from the user's POV. The 250 ms sleep lets
-        # the TCP socket leave TIME_WAIT before re-bind.
-        Logger.info(
-          "Fp3Camera: stream #{inspect(ref)} (#{info.camera}) client disconnected " <>
-            "(exit #{status}), re-spawning"
-        )
+        # The heartbeat ends in \r, not \n — splitting on newlines alone
+        # returns one ever-growing chunk and never sees a frame count.
+        lines =
+          line
+          |> String.split(~r/[\r\n]+/, trim: true)
+          |> Enum.map(&String.trim/1)
+          |> Enum.reject(&(&1 == ""))
 
-        Process.sleep(250)
-        new_handle = open_stream_port(info.camera, info.port, info.opts)
-        new_info = %{info | port_handle: new_handle}
-        {:noreply, %{state | streams: Map.put(state.streams, ref, new_info)}}
+        now = System.monotonic_time(:millisecond)
+        progressed? = Enum.any?(lines, &String.starts_with?(&1, "frames="))
+        connected? = Enum.any?(lines, &String.contains?(&1, "client connected"))
+
+        info = %{
+          info
+          | last_output: Enum.take(Enum.concat(info.last_output, lines), -5),
+            serving: info.serving or connected?,
+            last_progress_at: if(progressed?, do: now, else: info.last_progress_at)
+        }
+
+        {:noreply, put_in(state.streams[ref], info)}
 
       nil ->
         {:noreply, state}
     end
   end
 
+  def handle_info({port, {:exit_status, status}}, state) when is_port(port) do
+    case Enum.find(state.streams, fn {_, info} -> info.port_handle == port end) do
+      {ref, info} ->
+        lived = System.monotonic_time(:millisecond) - info.spawned_at
+
+        # Two very different exits arrive through this one message.
+        #
+        # A client disconnecting is the normal one: cam-stream's TCP
+        # server is single-client by design, so it exits when mpv goes
+        # away and we respawn to keep the stream listening.
+        #
+        # A child that dies immediately never served anyone — it failed
+        # to bind, or the camera would not open. Respawning that is not
+        # recovery, it is a 4 Hz fork loop that hides the real error and
+        # leaves `list_streams/0` reporting a stream nobody can watch.
+        if lived < @min_lifetime_ms do
+          Logger.error(
+            "Fp3Camera: stream #{inspect(ref)} (#{info.camera}, tcp/#{info.port}) exited " <>
+              "after #{lived} ms with status #{status} — not respawning. " <>
+              "cam-stream said: #{Enum.join(info.last_output, " | ")}"
+          )
+
+          {:noreply, %{state | streams: Map.delete(state.streams, ref)}}
+        else
+          Logger.info(
+            "Fp3Camera: stream #{inspect(ref)} (#{info.camera}) client disconnected " <>
+              "after #{lived} ms (exit #{status}), re-spawning"
+          )
+
+          # Lets the listening socket leave TIME_WAIT before the re-bind.
+          Process.sleep(250)
+
+          new_info = %{
+            info
+            | port_handle: open_stream_port(info.camera, info.port, info.opts),
+              spawned_at: System.monotonic_time(:millisecond),
+              last_output: [],
+              serving: false,
+              last_progress_at: nil
+          }
+
+          {:noreply, %{state | streams: Map.put(state.streams, ref, new_info)}}
+        end
+
+      nil ->
+        {:noreply, state}
+    end
+  end
+
+  # Two faults that never produce an exit_status, so nothing else sees
+  # them: the child was killed outside our control (the Port goes stale
+  # without delivering a status in some races), and the child is alive
+  # but has stopped producing frames because Venus wedged. Both leave
+  # list_streams/0 reporting a healthy stream that serves nothing.
+  def handle_info(:health_check, state) do
+    now = System.monotonic_time(:millisecond)
+
+    streams =
+      Enum.reduce(state.streams, state.streams, fn {ref, info}, acc ->
+        stalled? =
+          info.serving and info.last_progress_at != nil and
+            now - info.last_progress_at > @stall_timeout_ms
+
+        cond do
+          Port.info(info.port_handle) == nil ->
+            Logger.error(
+              "Fp3Camera: stream #{inspect(ref)} (#{info.camera}) vanished — the " <>
+                "cam-stream process is gone without an exit status. Dropping it; " <>
+                "last output: #{Enum.join(info.last_output, " | ")}"
+            )
+
+            Map.delete(acc, ref)
+
+          stalled? ->
+            Logger.error(
+              "Fp3Camera: stream #{inspect(ref)} (#{info.camera}) stalled — no frames " <>
+                "for #{now - info.last_progress_at} ms while serving a client. " <>
+                "Restarting it; last output: #{Enum.join(info.last_output, " | ")}"
+            )
+
+            close_stream_port(info.port_handle)
+            Process.sleep(250)
+
+            Map.put(acc, ref, %{
+              info
+              | port_handle: open_stream_port(info.camera, info.port, info.opts),
+                spawned_at: System.monotonic_time(:millisecond),
+                last_output: [],
+                serving: false,
+                last_progress_at: nil
+            })
+
+          true ->
+            acc
+        end
+      end)
+
+    {:noreply, %{state | streams: streams}}
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   ## Internals
 
-  defp default_port(:rear), do: 8889
-  defp default_port(:front), do: 8888
+  # Each stream occupies *two* consecutive TCP ports: the data socket,
+  # and the control socket cam-stream derives as data+1 (cam-stream.c,
+  # `control_port = listen_port + 1`). Rear used to default to 8889,
+  # which put the rear data socket exactly on the front stream's control
+  # port — so with both cameras streaming, whichever started second died
+  # on bind. Allocate two apart, and pass --control explicitly so the
+  # pairing is owned here rather than implied by the binary's default.
+  defp default_port(:rear), do: 8888
+  defp default_port(:front), do: 8890
+
+  defp control_port(tcp_port), do: tcp_port + 1
 
   defp open_stream_port(camera, tcp_port, opts) do
     args =
-      ["--camera", to_string(camera), "--listen", to_string(tcp_port)] ++
+      ["--camera", to_string(camera), "--listen", to_string(tcp_port),
+       "--control", to_string(control_port(tcp_port))] ++
         stream_extras(opts)
 
     Port.open({:spawn_executable, @cam_stream}, [

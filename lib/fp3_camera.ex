@@ -204,6 +204,18 @@ defmodule Fp3Camera do
   def streams, do: Capture.list_streams()
 
   @doc """
+  Run the end-to-end self-test: detect, setup, still and live stream for
+  every fitted camera, judged on bytes rather than on exit codes.
+
+  Prints a table and returns the structured results.
+
+      iex> Fp3Camera.selftest()
+
+  See `Fp3Camera.Diagnostics` for options.
+  """
+  def selftest(opts \\ []), do: Fp3Camera.Diagnostics.run(opts)
+
+  @doc """
   Subscribe to a live NV12 frame feed. Starts a supervised cam-stream
   in its `--out-nv12` mode and forwards each frame to the calling
   process as
