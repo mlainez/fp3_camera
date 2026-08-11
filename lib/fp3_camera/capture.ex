@@ -75,6 +75,8 @@ defmodule Fp3Camera.Capture do
   loop, and `tune/2` to adjust a *running* stream without restarting it.
   """
   def snap(camera, path, opts \\ []) do
+    opts = Fp3Camera.Config.resolve(camera, :snap, opts)
+
     with :ok <- Manager.setup(camera),
          {:ok, opts} <- resolve_auto_exposure(camera, opts) do
       args = ["--camera", to_string(camera), "--out", path] ++ snap_extras(opts)
@@ -386,6 +388,8 @@ defmodule Fp3Camera.Capture do
   defp control_port(tcp_port), do: tcp_port + 1
 
   defp open_stream_port(camera, tcp_port, opts) do
+    opts = Fp3Camera.Config.resolve(camera, :stream, opts)
+
     args =
       ["--camera", to_string(camera), "--listen", to_string(tcp_port),
        "--control", to_string(control_port(tcp_port))] ++

@@ -4,6 +4,9 @@ defmodule Fp3Camera.Application do
 
   @impl true
   def start(_type, _args) do
+    # Bring back whatever the last calibration session saved.
+    Fp3Camera.Config.load()
+
     children = [
       Fp3Camera.Manager,
       Fp3Camera.Capture,

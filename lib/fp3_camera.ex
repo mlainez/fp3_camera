@@ -42,6 +42,23 @@ defmodule Fp3Camera do
   @type camera :: :rear | :front
 
   @doc """
+  Per-sensor, per-mode capture settings. See `Fp3Camera.Config`.
+
+      Fp3Camera.configure({:rear, :stream}, wb: {1.9, 1.0, 1.53})
+      Fp3Camera.save_config()      # survives the reboot
+  """
+  defdelegate configure(scope, opts), to: Fp3Camera.Config, as: :put
+
+  @doc "Everything set at runtime, by scope. See `Fp3Camera.Config`."
+  defdelegate config(), to: Fp3Camera.Config, as: :get
+
+  @doc "Persist runtime settings so they outlive a reboot."
+  defdelegate save_config(), to: Fp3Camera.Config, as: :save
+
+  @doc "Drop runtime settings for a scope, or `:all` of them."
+  defdelegate reset_config(scope \\ :all), to: Fp3Camera.Config, as: :reset
+
+  @doc """
   Get the currently-active pipeline defaults — gamma/contrast/saturation
   /wb etc. — that are merged into every `snap/3` and `start_stream/2`
   call. Returns a keyword list.
