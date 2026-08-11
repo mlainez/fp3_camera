@@ -21,7 +21,10 @@ defmodule Fp3Camera.Manager do
   # What is genuinely static is the *slot topology* — which CSIPHY, CSID,
   # ISPIF and VFE RDI lane each slot is wired to, and which i2c address
   # its sensor answers on. That is a property of the mainboard, not of
-  # the module plugged into it, so it stays here. Rear and front take
+  # the module plugged into it, so it stays here. Note that the /dev/videoN
+  # path is NOT static and is deliberately absent: CAMSS registers those
+  # nodes alongside Venus, so the numbering shifts between boots and
+  # between phones. Only the entity name (msm_vfe0_videoN) is fixed. Rear and front take
   # non-overlapping paths through VFE0's three RDI lanes so both can be
   # wired simultaneously (VFE1 fails to start streaming on this SoC;
   # using it would mean chasing a clock/regulator binding).
@@ -36,7 +39,7 @@ defmodule Fp3Camera.Manager do
       csid: "msm_csid0",
       ispif: "msm_ispif0",
       vfe_rdi: "msm_vfe0_rdi0",
-      video: "/dev/video0"
+      vfe_video: "msm_vfe0_video0"
     },
     front: %{
       i2c_address: "4-0010",
@@ -44,7 +47,7 @@ defmodule Fp3Camera.Manager do
       csid: "msm_csid1",
       ispif: "msm_ispif1",
       vfe_rdi: "msm_vfe0_rdi1",
-      video: "/dev/video1"
+      vfe_video: "msm_vfe0_video1"
     }
   }
 
@@ -58,12 +61,19 @@ defmodule Fp3Camera.Manager do
   def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
 
   @doc """
-  Static description of a camera slot: which CSIPHY/CSID/ISPIF/VFE lane it
-  uses, the i2c address its sensor answers on, and its video node.
+  Static description of a camera slot: which CSIPHY, CSID, ISPIF and VFE
+  RDI lane it is wired to, the media entity of its VFE video node, and
+  the i2c address its sensor answers on.
 
-  This says nothing about which module is fitted. For that — the sensor,
-  its native resolution and its Bayer order — use `resolved/1`, which
-  reports what was actually found.
+  Deliberately no `/dev/videoN` here. CAMSS registers its video nodes
+  alongside Venus and the numbers move between boots and between phones —
+  the rear slot has been observed as `/dev/video0` and `/dev/video2` on
+  the same hardware. Only the *entity* name is fixed; the device node has
+  to be looked up, and `info/1` reports the one that was actually
+  resolved.
+
+  This also says nothing about which module is fitted. For that — the
+  sensor, its native resolution and its Bayer order — use `resolved/1`.
   """
   @spec slot(camera()) :: map() | nil
   def slot(camera), do: Map.get(@slots, camera)
@@ -87,8 +97,12 @@ defmodule Fp3Camera.Manager do
   def info(camera), do: {:error, {:unknown_camera, camera}}
 
   @doc """
-  The sensor fp3-cam-setup found in this slot: `:sensor`, `:width`,
-  `:height`, `:bayer`, `:subdev` and, if the module has one, `:lens`.
+  What fp3-cam-setup found in this slot: `:sensor`, `:width`, `:height`,
+  `:bayer`, `:subdev`, the `:video` node it resolved, and `:lens` if the
+  module has one.
+
+  `:video` and `:subdev` are looked up rather than assumed — neither
+  numbering is stable across boots or across the two phone variants.
   """
   @spec resolved(camera()) :: {:ok, map()} | {:error, term()}
   def resolved(camera) when is_map_key(@slots, camera) do
