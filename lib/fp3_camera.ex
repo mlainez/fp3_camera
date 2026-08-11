@@ -1,6 +1,6 @@
 defmodule Fp3Camera do
   @moduledoc """
-  Stills + live video on the FP3+ rear and front cameras.
+  Stills + live video on the Fairphone 3 and 3+ rear and front cameras.
 
   The msm8953 CAMSS subsystem dumps raw 10-bit packed Bayer onto a
   `/dev/videoN` node; the proprietary phone-camera ISP that handles
@@ -9,10 +9,19 @@ defmodule Fp3Camera do
   demosaic — viewable and sharable, but not tuned like a phone-app
   capture.
 
-  Two cameras are supported out of the box:
+  Two slots are supported, `:rear` and `:front`. What is *in* them is
+  not fixed: the modules are user-replaceable with a #00 screwdriver and
+  the Fairphone 3+ upgrade kit fits different silicon in each, so a given
+  phone can carry any mix of the two generations.
 
-    * `:rear`  — Samsung S5KGM1SP, 48 MP, native 4000×3000 SGRBG10
-    * `:front` — Samsung S5K3P9SP, 16 MP, native 4608×3456 SGRBG10
+  | Slot     | Fairphone 3               | Fairphone 3+              |
+  | -------- | ------------------------- | ------------------------- |
+  | `:rear`  | Sony IMX363, 4032×3024 RGGB | Samsung S5KGM1SP, 4000×3000 GRBG |
+  | `:front` | Samsung S5K4H7YX, 3264×2448 GRBG | Samsung S5K3P9SP, 4608×3456 GRBG |
+
+  Nothing here needs to know which one you have: `setup/1` asks
+  `fp3-cam-setup` to identify the fitted module and configure the
+  pipeline for it, and `info/1` reports what was found.
 
   ## Quick start
 
@@ -82,9 +91,30 @@ defmodule Fp3Camera do
   Configure the media-ctl pipeline for `camera`. Called automatically
   by `snap/2` and `start_stream/2`; exposed in case you want to set up
   the pipeline early.
+
+  `mode` is `:full` (sensor native resolution, what stills want) or
+  `:binned` (2x2 binned — a quarter of the sensor-to-DRAM bandwidth and
+  better SNR, what live video wants).
   """
-  @spec setup(camera()) :: :ok | {:error, term()}
-  def setup(camera), do: Manager.setup(camera)
+  @spec setup(camera(), Manager.mode()) :: :ok | {:error, term()}
+  def setup(camera, mode \\ :full), do: Manager.setup(camera, mode)
+
+  @doc """
+  Which module is actually fitted in `camera`, and how its pipeline is
+  configured: `:sensor`, `:width`, `:height`, `:bayer`, `:subdev`, the
+  `:lens` if it has one, plus the slot's static CSIPHY/CSID/ISPIF wiring.
+
+  Returns `{:error, :not_configured}` until `setup/2` has run, since
+  nothing looks at which module is present before then.
+
+      iex> Fp3Camera.setup(:rear)
+      :ok
+      iex> {:ok, info} = Fp3Camera.info(:rear)
+      iex> {info.sensor, info.width, info.height, info.bayer}
+      {"imx363 3-0010", 4032, 3024, "rggb"}
+  """
+  @spec info(camera()) :: {:ok, map()} | {:error, term()}
+  def info(camera), do: Manager.info(camera)
 
   @doc """
   Capture a single still and save it as JPEG at `path`.
