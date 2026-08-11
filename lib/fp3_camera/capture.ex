@@ -75,7 +75,8 @@ defmodule Fp3Camera.Capture do
   loop, and `tune/2` to adjust a *running* stream without restarting it.
   """
   def snap(camera, path, opts \\ []) do
-    with :ok <- Manager.setup(camera) do
+    with :ok <- Manager.setup(camera),
+         {:ok, opts} <- resolve_auto_exposure(camera, opts) do
       args = ["--camera", to_string(camera), "--out", path] ++ snap_extras(opts)
 
       case System.cmd(@cam_snap, args, stderr_to_stdout: true) do
@@ -418,6 +419,24 @@ defmodule Fp3Camera.Capture do
     end
 
     :ok
+  end
+
+  # `exposure: :auto` meters first. Nothing else sets exposure at all, so
+  # without this a dim subject is simply dark — see Fp3Camera.AutoExposure
+  # for the measured limits of both sensors.
+  defp resolve_auto_exposure(camera, opts) do
+    if Keyword.get(opts, :exposure) == :auto do
+      case Fp3Camera.AutoExposure.meter(camera, Keyword.delete(opts, :exposure)) do
+        {:ok, settings} ->
+          {:ok, Keyword.merge(Keyword.delete(opts, :exposure), settings)}
+
+        err ->
+          Logger.warning("Fp3Camera: metering failed (#{inspect(err)}), capturing as-is")
+          {:ok, Keyword.delete(opts, :exposure)}
+      end
+    else
+      {:ok, opts}
+    end
   end
 
   # Every cam-snap knob, so a calibration pass is an IEx call rather than
