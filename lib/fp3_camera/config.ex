@@ -53,8 +53,30 @@ defmodule Fp3Camera.Config do
       snap: [exposure: :auto],
       stream: [wb: {1.53, 1.0, 1.41}]
     },
-    "s5k4h7yx" => %{snap: [exposure: :auto], stream: []},
-    "s5k3p9sp" => %{snap: [exposure: :auto], stream: []}
+    # Both front parts take awb rather than a fixed table. cam-snap's
+    # front gains are 1.75/2.15, calibrated for neither of these: the
+    # raw frames come off close to balanced already — S5K4H7YX read
+    # R=130 G=133 B=131, S5K3P9SP R=81 G=86 B=84 — so those gains land
+    # a heavy magenta on both, R/G 1.68 B/G 2.03 on the FP3. Gray-world
+    # measured R/G 1.06 B/G 0.99 on the same scene, against an Android
+    # reference of 1.01/1.03.
+    "s5k4h7yx" => %{
+      snap: [exposure: :auto, awb: true],
+      stream: [wb: {1.37, 1.0, 1.24}]
+    },
+    # The FP3+ front is captured binned, not because binning is nicer but
+    # because its full 4608x3456 mode returns pure noise on this board
+    # while the binned 2304x1728 mode is clean — verified repeatedly, and
+    # true of the stream path as well, which has only ever run binned.
+    # Full res is roughly 4x the MIPI data rate; the split is exactly by
+    # sensor mode and nothing else. Until that is understood at the
+    # CSIPHY/link-frequency level this is a workaround, not a fix, and
+    # the FP3+ front therefore gives 4 MP stills rather than 16.
+    # See HANDOFF.md section 4.
+    "s5k3p9sp" => %{
+      snap: [exposure: :auto, awb: true, binned: true],
+      stream: [wb: {1.91, 1.0, 1.57}]
+    }
   }
 
   @doc """

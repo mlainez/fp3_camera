@@ -75,9 +75,14 @@ defmodule Fp3Camera.Capture do
   loop, and `tune/2` to adjust a *running* stream without restarting it.
   """
   def snap(camera, path, opts \\ []) do
-    opts = Fp3Camera.Config.resolve(camera, :snap, opts)
-
+    # Setup first, then resolve. Config keys its defaults on the fitted
+    # sensor, and the sensor name comes from /run/fp3-cam-<cam>.conf,
+    # which Manager.setup/1 is what writes. Resolving first meant a fresh
+    # boot looked up nil and silently got no defaults at all — stills
+    # came out with the wrong slot table while streams, which resolve
+    # after setup, were correct.
     with :ok <- Manager.setup(camera),
+         opts = Fp3Camera.Config.resolve(camera, :snap, opts),
          {:ok, opts} <- resolve_auto_exposure(camera, opts) do
       args = ["--camera", to_string(camera), "--out", path] ++ snap_extras(opts)
 
@@ -462,6 +467,7 @@ defmodule Fp3Camera.Capture do
       # White balance. `:awb` is gray-world from the frame; `:wb` is
       # explicit gains and overrides it; `:no_awb` forces the built-in
       # per-slot table.
+      {:binned, true} -> ["--binned"]
       {:awb, true} -> ["--awb"]
       {:awb, false} -> ["--no-awb"]
       {:wb, {r, g, b}} -> ["--wb", to_string(r), to_string(g), to_string(b)]
@@ -497,6 +503,8 @@ defmodule Fp3Camera.Capture do
       end)
 
     with :ok <- Manager.setup(camera) do
+      # Deliberately *not* config-resolved: this is the measurement used
+      # to derive the defaults, so it reports the sensor as it is.
       args =
         ["--camera", to_string(camera), "--out", path] ++
           snap_extras(Keyword.delete(opts, :path))
