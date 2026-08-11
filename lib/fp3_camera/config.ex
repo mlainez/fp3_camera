@@ -64,17 +64,14 @@ defmodule Fp3Camera.Config do
       snap: [exposure: :auto, awb: true],
       stream: [wb: {1.37, 1.0, 1.24}]
     },
-    # The FP3+ front is captured binned, not because binning is nicer but
-    # because its full 4608x3456 mode returns pure noise on this board
-    # while the binned 2304x1728 mode is clean — verified repeatedly, and
-    # true of the stream path as well, which has only ever run binned.
-    # Full res is roughly 4x the MIPI data rate; the split is exactly by
-    # sensor mode and nothing else. Until that is understood at the
-    # CSIPHY/link-frequency level this is a workaround, not a fix, and
-    # the FP3+ front therefore gives 4 MP stills rather than 16.
-    # See HANDOFF.md section 4.
+    # Full resolution works here now. It used to return pure noise: the
+    # driver declared half this sensor's real link frequency for its
+    # full-res mode only, which underclocked the VFE below the incoming
+    # data rate. Fixed in the kernel (s5k3p9sp: full res runs at 732 MHz,
+    # not 366), so the binned workaround that stood here is gone and this
+    # camera gives its full 16 MP again.
     "s5k3p9sp" => %{
-      snap: [exposure: :auto, awb: true, binned: true],
+      snap: [exposure: :auto, awb: true],
       stream: [wb: {1.91, 1.0, 1.57}]
     }
   }
