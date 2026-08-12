@@ -156,14 +156,9 @@ autoload, so `fp3-cam-setup` modprobes them.
 - Colour is close to Android's on all four sensors but not calibrated
   against a known target under known illuminants; the built-in gains come
   from measurements in one scene.
-- **The FP3+ front camera is captured binned, at 2304x1728 rather than
-  4608x3456.** Its full-resolution mode returns pure sensor noise on this
-  board; the binned mode is clean. Verified both ways, repeatedly, and
-  consistent with the stream path, which has only ever run binned and has
-  never been affected. Full res is roughly four times the MIPI data rate,
-  so this most likely lives in the CSIPHY timer or link frequency for
-  that one sensor mode. It is a workaround, not a fix — that camera
-  yields 4 MP stills instead of 16.
+- Auto-exposure runs out of range on the FP3+ front at full resolution in
+  dim light — a quarter the light per pixel compared with binned, so its
+  ceiling is lower than the other three.
 - Streams centre-crop rather than scale, so a stream sees roughly 30% less
   vertical field of view than the still from the same camera.
 - Venus wants its NV12 input width a multiple of 128; `cam-stream`
