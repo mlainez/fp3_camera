@@ -573,8 +573,8 @@ defmodule Fp3Camera.Capture do
 
   # Each stream occupies *two* consecutive TCP ports: the data socket and
   # the control socket (cam-stream's default is data+1; we pass --control
-  # explicitly so the pairing is owned here). Rear used to default to
-  # 8889, which put its data socket on the front stream's control port.
+  # explicitly so the pairing is owned here). Rear 8888/8889 and front
+  # 8890/8891 therefore never overlap.
   @doc false
   def default_port(:rear), do: 8888
   def default_port(:front), do: 8890
