@@ -30,8 +30,6 @@ defmodule Fp3Camera.AutoExposure do
   on both, so the search stays inside the range the hardware honours.
   """
 
-  require Logger
-
   alias Fp3Camera.Capture
 
   # Raw 10-bit green mean to aim for. Black level is 64, so this sits a
@@ -119,7 +117,8 @@ defmodule Fp3Camera.AutoExposure do
   # Signal above black scales with exposure; the pedestal does not, so
   # take it off before taking the ratio. Skipping that step is what made
   # the gray-world white balance under-correct for so long.
-  defp rescale(current, level, target, lo, hi) do
+  @doc false
+  def rescale(current, level, target, lo, hi) do
     ratio = (target - @black_level) / max(level - @black_level, 1)
 
     (current * ratio)

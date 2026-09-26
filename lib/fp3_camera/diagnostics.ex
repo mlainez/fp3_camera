@@ -28,8 +28,6 @@ defmodule Fp3Camera.Diagnostics do
     * `:keep`        — keep the captured files (default: `true`)
   """
 
-  require Logger
-
   @doc """
   Run the full matrix and print it. Returns a list of per-camera maps.
   """
@@ -178,8 +176,9 @@ defmodule Fp3Camera.Diagnostics do
   # SOF0/SOF2 carry the real decoded dimensions; reading them proves the
   # sensor geometry made it all the way through, which a byte count does
   # not.
-  defp jpeg_size(<<0xFF, 0xD8, rest::binary>>), do: scan_sof(rest)
-  defp jpeg_size(_), do: {0, 0}
+  @doc false
+  def jpeg_size(<<0xFF, 0xD8, rest::binary>>), do: scan_sof(rest)
+  def jpeg_size(_), do: {0, 0}
 
   defp scan_sof(<<0xFF, m, _len::16, body::binary>>) when m in [0xC0, 0xC1, 0xC2] do
     case body do
@@ -192,7 +191,7 @@ defmodule Fp3Camera.Diagnostics do
     skip = len - 2
 
     case rest do
-      <<_::binary-size(skip), more::binary>> -> scan_sof(more)
+      <<_::binary-size(^skip), more::binary>> -> scan_sof(more)
       _ -> {0, 0}
     end
   end
@@ -290,16 +289,17 @@ defmodule Fp3Camera.Diagnostics do
   # keyframe; a P-frame count proves it kept going afterwards, which a
   # single buffered frame — the failure everyone mistook for success —
   # does not.
-  defp count_nals(<<>>), do: %{sps: 0, pps: 0, idr: 0, p: 0}
+  @doc false
+  def count_nals(<<>>), do: %{sps: 0, pps: 0, idr: 0, p: 0}
 
-  defp count_nals(data) do
+  def count_nals(data) do
     <<0>>
     |> then(&(data <> &1))
     |> then(fn padded ->
       :binary.matches(padded, <<0, 0, 1>>)
       |> Enum.reduce(%{sps: 0, pps: 0, idr: 0, p: 0}, fn {pos, _}, acc ->
         case padded do
-          <<_::binary-size(pos + 3), b, _::binary>> ->
+          <<_::binary-size(^pos + 3), b, _::binary>> ->
             case Bitwise.band(b, 0x1F) do
               7 -> %{acc | sps: acc.sps + 1}
               8 -> %{acc | pps: acc.pps + 1}
@@ -318,7 +318,7 @@ defmodule Fp3Camera.Diagnostics do
   ## Environment
 
   defp fitted_cameras do
-    Enum.filter([:rear, :front], &File.exists?("/run/fp3-cam-#{&1}.conf"))
+    Enum.filter([:rear, :front], &File.exists?(Fp3Camera.Paths.conf_path(&1)))
     |> case do
       [] -> [:rear, :front]
       list -> list

@@ -1,7 +1,7 @@
 defmodule Fp3Camera.Manager do
   @moduledoc false
   # Brings up the CAMSS media pipeline so the requested camera's raw Bayer
-  # frames land on a /dev/videoN node ready for GStreamer or cam-snap.
+  # frames land on a /dev/videoN node, and reads back what was found.
   #
   # The pipeline is configured by fp3-cam-setup, from the system's
   # fp3-camera-utils package, rather than by media-ctl calls made here.
@@ -18,6 +18,14 @@ defmodule Fp3Camera.Manager do
   # So fp3-cam-setup owns the detection, and publishes what it found to
   # /run/fp3-cam-<camera>.conf for everyone else to read.
   #
+  # The binaries also own the *geometry*: cam-snap re-runs fp3-cam-setup
+  # (native resolution, or binned with --binned) and cam-stream re-runs
+  # `fp3-cam-setup --binned` before every capture. So nothing here caches
+  # which mode the pipeline is in — any cache would go stale the moment a
+  # binary reconfigured it. setup/1 always runs the script (it is
+  # idempotent and ~50 ms of media-ctl calls), and the conf file is the
+  # single source of truth for what the pipeline is currently set to.
+  #
   # What is genuinely static is the *slot topology* — which CSIPHY, CSID,
   # ISPIF and VFE RDI lane each slot is wired to, and which i2c address
   # its sensor answers on. That is a property of the mainboard, not of
@@ -31,6 +39,8 @@ defmodule Fp3Camera.Manager do
 
   use GenServer
   require Logger
+
+  alias Fp3Camera.Paths
 
   @slots %{
     rear: %{
@@ -51,10 +61,20 @@ defmodule Fp3Camera.Manager do
     }
   }
 
-  @setup_binary "fp3-cam-setup"
+  # fp3-cam-setup is ~50 ms when healthy; this is the ceiling for a
+  # wedged media-ctl before the caller gets an exit instead of an answer.
+  @setup_timeout 15_000
+
+  # cam-stream's output frame: the largest Venus-aligned frame that fits
+  # the binned source, capped at 1080p. Mirrors main() in cam-stream.c
+  # (OUT_W/OUT_H, ENC_ALIGN_W/ENC_ALIGN_H); the Subscriber depends on it
+  # to slice the NV12 byte stream into frames.
+  @out_w 1920
+  @out_h 1080
+  @align_w 128
+  @align_h 32
 
   @type camera :: :rear | :front
-  @type mode :: :full | :binned
 
   ## Public API
 
@@ -65,44 +85,28 @@ defmodule Fp3Camera.Manager do
   RDI lane it is wired to, the media entity of its VFE video node, and
   the i2c address its sensor answers on.
 
-  Deliberately no `/dev/videoN` here. CAMSS registers its video nodes
-  alongside Venus and the numbers move between boots and between phones —
-  the rear slot has been observed as `/dev/video0` and `/dev/video2` on
-  the same hardware. Only the *entity* name is fixed; the device node has
-  to be looked up, and `info/1` reports the one that was actually
-  resolved.
-
-  This also says nothing about which module is fitted. For that — the
-  sensor, its native resolution and its Bayer order — use `resolved/1`.
+  Deliberately no `/dev/videoN` here: CAMSS registers its video nodes
+  alongside Venus and the numbers move between boots and between phones.
   """
   @spec slot(camera()) :: map() | nil
   def slot(camera), do: Map.get(@slots, camera)
 
   @doc """
-  Everything known about a camera: its slot topology merged with the
-  sensor detected in it.
-
-  Returns `{:error, :not_configured}` before `setup/1` has run for this
-  camera, because until the pipeline is brought up nothing has looked at
-  which module is present.
+  Everything known about a camera: its slot topology merged with what
+  fp3-cam-setup last published for it. `{:error, :not_configured}` until
+  the pipeline has been set up once.
   """
   @spec info(camera()) :: {:ok, map()} | {:error, term()}
   def info(camera) when is_map_key(@slots, camera) do
-    case resolved(camera) do
-      {:ok, sensor} -> {:ok, Map.merge(@slots[camera], sensor)}
-      {:error, _} = err -> err
-    end
+    with {:ok, conf} <- resolved(camera), do: {:ok, Map.merge(@slots[camera], conf)}
   end
 
   def info(camera), do: {:error, {:unknown_camera, camera}}
 
   @doc """
-  What fp3-cam-setup found in this slot: `:sensor`, `:width`, `:height`,
-  `:bayer`, `:subdev`, the `:video` node it resolved, and `:lens` if the
-  module has one.
-
-  `:video` and `:subdev` are looked up rather than assumed — neither
-  numbering is stable across boots or across the two phone variants.
+  What fp3-cam-setup published for this slot: `:sensor`, `:width`,
+  `:height`, `:bayer`, `:subdev`, `:video`, and `:lens` on the rear. A
+  plain file read — no GenServer, no media-ctl.
   """
   @spec resolved(camera()) :: {:ok, map()} | {:error, term()}
   def resolved(camera) when is_map_key(@slots, camera) do
@@ -115,96 +119,110 @@ defmodule Fp3Camera.Manager do
   def resolved(camera), do: {:error, {:unknown_camera, camera}}
 
   @doc """
-  Ensure the media-ctl pipeline for `camera` is configured.
-
-  `:full` uses the sensor's native resolution and is what stills want;
-  `:binned` uses its 2x2 binned mode, a quarter of the sensor-to-DRAM
-  bandwidth and better SNR, which is what live video wants. Switching
-  mode reconfigures even if the camera was already set up.
+  Configure `camera`'s pipeline at the sensor's native resolution — the
+  mode cam-snap uses for stills.
   """
-  @spec setup(camera(), mode()) :: :ok | {:error, term()}
-  def setup(camera, mode \\ :full)
-
-  def setup(camera, mode) when is_map_key(@slots, camera) and mode in [:full, :binned] do
-    GenServer.call(__MODULE__, {:setup, camera, mode}, 15_000)
+  @spec setup(camera()) :: :ok | {:error, term()}
+  def setup(camera) do
+    with {:ok, _conf} <- run_setup(camera, []), do: :ok
   end
 
-  def setup(camera, mode) when is_map_key(@slots, camera),
-    do: {:error, {:unknown_mode, mode}}
+  @doc """
+  Configure `camera`'s pipeline exactly as cam-stream is about to (2x2
+  binned), and return the conf plus the frame size cam-stream will emit
+  as `:out_width`/`:out_height`.
 
-  def setup(camera, _mode), do: {:error, {:unknown_camera, camera}}
+  cam-stream runs `fp3-cam-setup --binned` itself, so doing it here first
+  changes nothing on the device; it is what lets this side know the frame
+  geometry before the first byte arrives.
+  """
+  @spec prepare_stream(camera()) :: {:ok, map()} | {:error, term()}
+  def prepare_stream(camera) do
+    with {:ok, conf} <- run_setup(camera, ["--binned"]) do
+      {out_w, out_h} = stream_size(conf.width, conf.height)
+      {:ok, Map.merge(conf, %{out_width: out_w, out_height: out_h})}
+    end
+  end
+
+  @doc false
+  # The frame size cam-stream derives from the binned sensor size. The
+  # phase offset costs a pixel, hence the -1; the cap is rounded down to
+  # the alignment too, which is why a "1080p" stream is 1056 lines.
+  @spec stream_size(pos_integer(), pos_integer()) :: {non_neg_integer(), non_neg_integer()}
+  def stream_size(w, h) do
+    fit_w = Bitwise.band(w - 1, Bitwise.bnot(@align_w - 1))
+    fit_h = Bitwise.band(h - 1, Bitwise.bnot(@align_h - 1))
+    cap_w = Bitwise.band(@out_w, Bitwise.bnot(@align_w - 1))
+    cap_h = Bitwise.band(@out_h, Bitwise.bnot(@align_h - 1))
+    {if(fit_w < @out_w, do: fit_w, else: cap_w), if(fit_h < @out_h, do: fit_h, else: cap_h)}
+  end
+
+  defp run_setup(camera, flags) when is_map_key(@slots, camera) do
+    GenServer.call(__MODULE__, {:setup, camera, flags}, @setup_timeout)
+  end
+
+  defp run_setup(camera, _flags), do: {:error, {:unknown_camera, camera}}
 
   ## GenServer
+  #
+  # The process exists only to serialise media-ctl: two fp3-cam-setup runs
+  # interleaving their link and format calls would leave the graph in a
+  # state neither asked for. It deliberately keeps no state.
 
   @impl true
-  def init(_), do: {:ok, %{configured: %{}}}
+  def init(_), do: {:ok, %{}}
 
   @impl true
-  def handle_call({:setup, camera, mode}, _from, state) do
-    if Map.get(state.configured, camera) == mode do
-      {:reply, :ok, state}
-    else
-      case do_setup(camera, mode) do
-        :ok ->
-          {:reply, :ok, put_in(state.configured[camera], mode)}
-
-        {:error, _} = err ->
-          # Drop any cached mode: the pipeline is in an unknown state now,
-          # so the next call must reconfigure rather than assume.
-          {:reply, err, %{state | configured: Map.delete(state.configured, camera)}}
-      end
-    end
+  def handle_call({:setup, camera, flags}, _from, state) do
+    {:reply, do_setup(camera, flags), state}
   end
 
   ## Internals
 
-  defp do_setup(camera, mode) do
-    args = if mode == :binned, do: ["--binned", to_string(camera)], else: [to_string(camera)]
+  defp do_setup(camera, flags) do
+    args = flags ++ [to_string(camera)]
 
-    case System.cmd(@setup_binary, args, stderr_to_stdout: true) do
-      {_out, 0} ->
-        case read_conf(camera) do
-          {:ok, conf} ->
-            Logger.info(
-              "Fp3Camera: #{camera} pipeline ready — #{conf.sensor} " <>
-                "#{conf.width}x#{conf.height} #{conf.bayer} on #{conf.video}"
-            )
+    with {:ok, bin} <- Paths.executable(:fp3_cam_setup) do
+      case System.cmd(bin, args, stderr_to_stdout: true) do
+        {_out, 0} ->
+          case read_conf(camera) do
+            {:ok, conf} ->
+              Logger.debug(
+                "Fp3Camera: #{camera} pipeline ready — #{conf.sensor} " <>
+                  "#{conf.width}x#{conf.height} #{conf[:bayer]} on #{conf[:video]}"
+              )
 
-            :ok
+              {:ok, conf}
 
-          :error ->
-            # fp3-cam-setup reported success but left nothing behind. Treat
-            # that as a failure rather than carrying on with no idea what
-            # the pipeline was configured for.
-            {:error, {:no_conf_written, conf_path(camera)}}
-        end
+            :error ->
+              # fp3-cam-setup reported success but left nothing behind.
+              {:error, {:no_conf_written, Paths.conf_path(camera)}}
+          end
 
-      {out, rc} ->
-        Logger.error("Fp3Camera: #{@setup_binary} #{Enum.join(args, " ")} failed (#{rc}): #{out}")
-        {:error, {:setup_failed, rc, String.trim(out)}}
+        {out, rc} ->
+          Logger.error("Fp3Camera: #{bin} #{Enum.join(args, " ")} failed (#{rc}): #{out}")
+          {:error, {:setup_failed, rc, String.trim(out)}}
+      end
     end
   rescue
-    e in ErlangError ->
-      # System.cmd raises if the binary is missing, which means the system
-      # image does not carry fp3-camera-utils.
-      {:error, {:setup_binary_unavailable, @setup_binary, Exception.message(e)}}
+    e in ErlangError -> {:error, {:setup_failed, Exception.message(e)}}
   end
 
-  defp conf_path(camera), do: "/run/fp3-cam-#{camera}.conf"
-
-  # KEY=value, with the sensor name single-quoted because it contains a
-  # space ("imx363 3-0010").
   defp read_conf(camera) do
-    with {:ok, body} <- File.read(conf_path(camera)),
-         %{} = conf <- parse_conf(body),
-         true <- Map.has_key?(conf, :sensor) and Map.has_key?(conf, :width) do
+    with {:ok, body} <- File.read(Paths.conf_path(camera)),
+         %{sensor: _, width: _, height: _} = conf <- parse_conf(body) do
       {:ok, conf}
     else
       _ -> :error
     end
   end
 
-  defp parse_conf(body) do
+  @doc false
+  # KEY=value lines as fp3-cam-setup writes them, the sensor name
+  # single-quoted because it contains a space ("imx363 3-0010").
+  # Unknown keys and malformed lines are ignored.
+  @spec parse_conf(String.t()) :: map()
+  def parse_conf(body) do
     body
     |> String.split("\n", trim: true)
     |> Enum.reduce(%{}, fn line, acc ->
@@ -215,12 +233,9 @@ defmodule Fp3Camera.Manager do
     end)
   end
 
-  defp unquote_value(value) do
-    value
-    |> String.trim()
-    |> String.trim("'")
-  end
+  defp unquote_value(value), do: value |> String.trim() |> String.trim("'")
 
+  defp put_conf(acc, _key, ""), do: acc
   defp put_conf(acc, "SENSOR", v), do: Map.put(acc, :sensor, v)
   defp put_conf(acc, "VIDEO", v), do: Map.put(acc, :video, v)
   defp put_conf(acc, "SUBDEV", v), do: Map.put(acc, :subdev, v)
@@ -232,8 +247,8 @@ defmodule Fp3Camera.Manager do
 
   defp put_integer(acc, key, value) do
     case Integer.parse(value) do
-      {n, _} -> Map.put(acc, key, n)
-      :error -> acc
+      {n, _} when n > 0 -> Map.put(acc, key, n)
+      _ -> acc
     end
   end
 end

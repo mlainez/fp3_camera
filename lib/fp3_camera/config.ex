@@ -13,19 +13,24 @@ defmodule Fp3Camera.Config do
   the IMX363, gains that render the still neutral leave the stream
   visibly green.
 
+  Mode is `:snap` for stills (`snap/3`, `snap_bytes/2`) and `:stream`
+  for cam-stream (`start_stream/2` and `subscribe/2`). `snap_stats/2`
+  bypasses this module entirely: it is the measurement the table is
+  derived from.
+
   Resolution order, later winning:
 
-    1. `@builtin` below, chosen by sensor and mode
+    1. the built-in table in this module, chosen by sensor and mode
     2. `config :fp3_camera, :defaults, [...]` — applies to everything
-    3. `config :fp3_camera, :sensor_defaults, %{"imx363" => [...]}`
-    4. runtime `put/2`, optionally persisted with `save/0`
+    3. `config :fp3_camera, :sensor_defaults, %{"imx363" => [...]}` —
+       per sensor, both modes
+    4. runtime `put/2` (`:all` first, then `{sensor, mode}`), optionally
+       persisted with `save/0`
     5. options passed to the call itself
 
   So a calibration session is `put/2` until it looks right, then
   `save/0`, and it survives the reboot.
   """
-
-  require Logger
 
   @store "/root/fp3-camera.config"
 
@@ -76,10 +81,16 @@ defmodule Fp3Camera.Config do
     }
   }
 
+  @type scope :: :all | {String.t() | :rear | :front, :snap | :stream}
+
   @doc """
   The merged options for `camera` in `mode` (`:snap` or `:stream`),
   with `opts` from the call site winning over everything.
+
+  The sensor is read from `/run/fp3-cam-<camera>.conf`; before the slot
+  has been set up only layers 2, 4 (`:all`) and 5 apply.
   """
+  @spec resolve(:rear | :front, :snap | :stream, keyword()) :: keyword()
   def resolve(camera, mode, opts \\ []) do
     sensor = sensor_for(camera)
 
@@ -103,19 +114,31 @@ defmodule Fp3Camera.Config do
     * `{camera, mode}` — e.g. `{:rear, :stream}`, resolved to the
       sensor currently fitted in that slot
 
-  Merges into what is already set; a key with `nil` clears it.
+  `mode` is `:snap` (stills) or `:stream` (`start_stream/2` and
+  `subscribe/2`, which share cam-stream's pipeline).
+
+  Merges into what is already set; a key with `nil` clears it. Returns
+  the merged settings for the scope, or `{:error, {:not_configured,
+  camera}}` for a `{camera, mode}` scope whose slot has not been set up
+  yet (the fitted sensor is unknown until then).
 
       Fp3Camera.Config.put({:rear, :stream}, wb: {1.9, 1.0, 1.5})
   """
+  @spec put(scope(), keyword()) :: keyword() | {:error, term()}
   def put(scope, opts) when is_list(opts) do
-    key = normalise(scope)
-    all = runtime_all()
-    merged = all |> Map.get(key, []) |> merge(opts) |> Enum.reject(&match?({_, nil}, &1))
-    Application.put_env(:fp3_camera, :runtime_config, Map.put(all, key, merged))
-    merged
+    with {:ok, key} <- normalise(scope) do
+      all = runtime_all()
+
+      merged =
+        all |> Map.get(key, []) |> merge(opts) |> Enum.reject(&match?({_, nil}, &1))
+
+      Application.put_env(:fp3_camera, :runtime_config, Map.put(all, key, merged))
+      merged
+    end
   end
 
   @doc "Everything currently set at runtime, by scope."
+  @spec get() :: map()
   def get, do: runtime_all()
 
   @doc "Drop runtime overrides — for one scope, or all of them."
@@ -127,8 +150,10 @@ defmodule Fp3Camera.Config do
   end
 
   def reset(scope) do
-    Application.put_env(:fp3_camera, :runtime_config, Map.delete(runtime_all(), normalise(scope)))
-    :ok
+    with {:ok, key} <- normalise(scope) do
+      Application.put_env(:fp3_camera, :runtime_config, Map.delete(runtime_all(), key))
+      :ok
+    end
   end
 
   @doc """
@@ -175,19 +200,21 @@ defmodule Fp3Camera.Config do
     |> Map.get(sensor, [])
   end
 
-  defp normalise({camera, mode}) when camera in [:rear, :front],
-    do: {sensor_for(camera), mode}
+  defp normalise({camera, mode}) when camera in [:rear, :front] do
+    case sensor_for(camera) do
+      nil -> {:error, {:not_configured, camera}}
+      sensor -> {:ok, {sensor, mode}}
+    end
+  end
 
-  defp normalise(other), do: other
+  defp normalise(other), do: {:ok, other}
 
   # The part actually fitted, from what fp3-cam-setup published. Keyed on
   # the bare model name, so the i2c address in the entity name — "imx363
   # 3-0010" — does not have to match.
   defp sensor_for(camera) do
-    with {:ok, body} <- File.read("/run/fp3-cam-#{camera}.conf"),
-         [_, value] <- Regex.run(~r/SENSOR='?([^'\n]+)'?/, body) do
-      value |> String.split() |> List.first()
-    else
+    case Fp3Camera.Manager.resolved(camera) do
+      {:ok, %{sensor: sensor}} -> sensor |> String.split() |> List.first()
       _ -> nil
     end
   end
