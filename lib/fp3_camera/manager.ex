@@ -93,15 +93,25 @@ defmodule Fp3Camera.Manager do
 
   @doc """
   Everything known about a camera: its slot topology merged with what
-  fp3-cam-setup last published for it. `{:error, :not_configured}` until
-  the pipeline has been set up once.
+  fp3-cam-setup last published for it. Sets the pipeline up first if it
+  hasn't been since boot.
   """
   @spec info(camera()) :: {:ok, map()} | {:error, term()}
   def info(camera) when is_map_key(@slots, camera) do
-    with {:ok, conf} <- resolved(camera), do: {:ok, Map.merge(@slots[camera], conf)}
+    with {:ok, conf} <- resolved_or_setup(camera), do: {:ok, Map.merge(@slots[camera], conf)}
   end
 
   def info(camera), do: {:error, {:unknown_camera, camera}}
+
+  defp resolved_or_setup(camera) do
+    case resolved(camera) do
+      {:error, :not_configured} ->
+        with :ok <- setup(camera), do: resolved(camera)
+
+      other ->
+        other
+    end
+  end
 
   @doc """
   What fp3-cam-setup published for this slot: `:sensor`, `:width`,

@@ -41,13 +41,22 @@ defmodule Fp3Camera.ManagerTest do
 
   test "setup/1 runs fp3-cam-setup natively and info/1 reads the conf" do
     dir = FakeSystem.install()
-    assert Manager.info(:rear) == {:error, :not_configured}
+    assert Manager.resolved(:rear) == {:error, :not_configured}
     assert Manager.setup(:rear) == :ok
     assert FakeSystem.calls(dir, "fp3-cam-setup") == ["rear"]
 
     assert {:ok, info} = Manager.info(:rear)
     assert %{sensor: "imx363 3-0010", width: 4032, height: 3024, csiphy: "msm_csiphy0"} = info
     refute Map.has_key?(info, :lens)
+  end
+
+  test "info/1 sets the camera up when it isn't configured yet" do
+    dir = FakeSystem.install()
+    assert {:ok, %{sensor: "imx363 3-0010"}} = Manager.info(:rear)
+    assert FakeSystem.calls(dir, "fp3-cam-setup") == ["rear"]
+
+    assert {:ok, _} = Manager.info(:rear)
+    assert FakeSystem.calls(dir, "fp3-cam-setup") == ["rear"]
   end
 
   test "setup/1 always runs the script — no stale cache" do

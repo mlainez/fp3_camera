@@ -82,10 +82,8 @@ defmodule Fp3Camera do
 
   `:width`/`:height` are the pipeline's *current* geometry: native after
   `setup/1` or a still, 2x2-binned once a stream or subscription has
-  started. Returns `{:error, :not_configured}` until the pipeline has
-  been set up once.
+  started. Sets the pipeline up first if it hasn't been since boot.
 
-      Fp3Camera.setup(:rear)
       {:ok, info} = Fp3Camera.info(:rear)
       {info.sensor, info.width, info.height, info.bayer}
       #=> {"imx363 3-0010", 4032, 3024, "rggb"}
