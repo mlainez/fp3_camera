@@ -1,50 +1,45 @@
 defmodule Fp3Camera do
   @moduledoc """
-  Stills + live video on the Fairphone 3 and 3+ rear and front cameras.
+  Stills and live video from the Fairphone 3 and 3+ rear and front cameras.
 
-  The msm8953 CAMSS subsystem dumps raw 10-bit packed Bayer onto a
-  `/dev/videoN` node; the proprietary phone-camera ISP that handles
-  AE/AWB/AF lives on a Hexagon DSP firmware we don't ship. So images
-  here come straight from the sensor through a NEON-accelerated Bayer
-  demosaic — viewable and sharable, but not tuned like a phone-app
-  capture.
+  Frames come from libcamera, whose software ISP turns the sensors' raw
+  Bayer data into RGB on the CPU; streams are encoded to H.264 by the
+  Venus hardware encoder. Everything runs as `gst-launch-1.0` pipelines.
 
   Two slots are supported, `:rear` and `:front`. What is *in* them is
-  not fixed: the modules are user-replaceable with a #00 screwdriver and
-  the Fairphone 3+ upgrade kit fits different silicon in each, so a given
-  phone can carry any mix of the two generations.
+  not fixed: the modules are user-replaceable and the Fairphone 3+ kit
+  fits different sensors, so a phone can carry any mix of them.
 
-  | Slot     | Fairphone 3               | Fairphone 3+              |
-  | -------- | ------------------------- | ------------------------- |
-  | `:rear`  | Sony IMX363, 4032×3024 RGGB | Samsung S5KGM1SP, 4000×3000 GRBG |
-  | `:front` | Samsung S5K4H7YX, 3264×2448 GRBG | Samsung S5K3P9SP, 4608×3456 GRBG |
+  | Slot     | Fairphone 3      | Fairphone 3+ |
+  | -------- | ---------------- | ------------ |
+  | `:rear`  | Sony IMX363      | Samsung S5KGM1SP |
+  | `:front` | Samsung S5K4H7YX | Samsung S5K3P9SP |
 
-  Nothing here needs to know which one you have: `setup/1` asks
-  `fp3-cam-setup` to identify the fitted module and configure the
-  pipeline for it, and `info/1` reports what was found.
+  `info/1` reports what is fitted.
 
   ## Quick start
 
       iex> Fp3Camera.snap(:rear, "/tmp/photo.jpg")
       {:ok, "/tmp/photo.jpg"}
 
-      iex> {:ok, stream} = Fp3Camera.start_stream(:rear, port: 8888)
+      iex> {:ok, stream} = Fp3Camera.start_stream(:rear)
       iex> # then, from another machine:
       iex> #   ffplay tcp://nerves.local:8888
-      iex> # This is a raw H.264 stream over TCP, not HTTP -- a browser
-      iex> # cannot open it.
       iex> Fp3Camera.stop_stream(stream)
       :ok
+
+  A camera serves one stream, subscription or still at a time; asking for
+  a busy one returns `{:error, :busy}`.
   """
 
-  alias Fp3Camera.{Capture, Manager}
+  alias Fp3Camera.{Camera, Still, Streams}
 
   @type camera :: :rear | :front
 
   @doc """
   Per-sensor, per-mode capture settings. See `Fp3Camera.Config`.
 
-      Fp3Camera.configure({:rear, :stream}, wb: {1.9, 1.0, 1.53})
+      Fp3Camera.configure({:rear, :snap}, gamma: 2.0)
       Fp3Camera.save_config()      # survives the reboot
   """
   defdelegate configure(scope, opts), to: Fp3Camera.Config, as: :put
@@ -58,239 +53,131 @@ defmodule Fp3Camera do
   @doc "Drop runtime settings for a scope, or `:all` of them."
   defdelegate reset_config(scope \\ :all), to: Fp3Camera.Config, as: :reset
 
-  @doc """
-  Get the currently-active pipeline defaults — gamma/contrast/saturation
-  /wb etc. — that are merged into every `snap/3` and `start_stream/2`
-  call. Returns a keyword list.
-
-  Empty by default — the binaries' own compile-time defaults (from
-  `cam_pipeline.h`) apply when no overrides are set.
-  """
+  @doc "Settings applied to every camera and mode, under any per-sensor ones."
   @spec get_defaults() :: keyword()
   def get_defaults(), do: Application.get_env(:fp3_camera, :defaults, [])
 
   @doc """
-  Override pipeline defaults at runtime. Merges into existing defaults;
-  pass a key with `nil` to clear it. The merged map is then used for
-  every subsequent `snap/3` and `start_stream/2` (existing streams are
-  unaffected — restart to apply).
+  Merge into the settings applied to every camera and mode. A key set to
+  `nil` is cleared. Running streams keep the settings they started with.
 
-  ## Example
-
-      Fp3Camera.set_defaults(gamma: 1.8, saturation: 1.7, wb: {2.0, 1.0, 1.4})
-
-  Keys honoured (same as per-call opts):
-    * `:gamma`, `:contrast`, `:saturation` — tone curve
-    * `:wb` — `{r, g, b}` floats; overrides per-camera WB defaults
-    * `:exposure`, `:gain` — sensor controls
-    * `:bitrate` — H.264 encode bitrate (streams only)
-    * `:denoise`, `:frames`, `:phone_curve` — stills only
+      Fp3Camera.set_defaults(gamma: 1.8, saturation: 1.7)
   """
   @spec set_defaults(keyword()) :: keyword()
   def set_defaults(opts) when is_list(opts) do
-    current = get_defaults()
-    merged =
-      Keyword.merge(current, opts)
-      |> Enum.reject(fn {_, v} -> is_nil(v) end)
-
+    merged = get_defaults() |> Keyword.merge(opts) |> Enum.reject(fn {_, v} -> is_nil(v) end)
     Application.put_env(:fp3_camera, :defaults, merged)
     merged
   end
 
-  @doc "Reset all pipeline defaults back to the binary's compile-time values."
+  @doc "Clear the settings set with `set_defaults/1`."
   @spec reset_defaults() :: :ok
   def reset_defaults() do
     Application.put_env(:fp3_camera, :defaults, [])
     :ok
   end
 
-  @doc false
-  def with_defaults(opts), do: Keyword.merge(get_defaults(), opts)
-
   @doc """
-  Configure the media-ctl pipeline for `camera`. Called automatically
-  by `snap/2` and `start_stream/2`; exposed in case you want to set up
-  the pipeline early.
+  Which sensor is fitted in `camera` and the frame sizes it gives:
+  `:sensor`, `:lens` (or `nil`), `:width` and `:height` at full
+  resolution, `:binned` as `{width, height}` and libcamera's `:id`.
 
-  `mode` is `:full` (sensor native resolution, what stills want) or
-  `:binned` (2x2 binned — a quarter of the sensor-to-DRAM bandwidth and
-  better SNR, what live video wants).
-  """
-  @spec setup(camera(), Manager.mode()) :: :ok | {:error, term()}
-  def setup(camera, mode \\ :full), do: Manager.setup(camera, mode)
+  The first call per camera opens it for about a second to read the
+  sizes; later calls are free.
 
-  @doc """
-  Which module is actually fitted in `camera`, and how its pipeline is
-  configured: `:sensor`, `:width`, `:height`, `:bayer`, `:subdev`, the
-  `:lens` if it has one, plus the slot's static CSIPHY/CSID/ISPIF wiring.
-
-  Returns `{:error, :not_configured}` until `setup/2` has run, since
-  nothing looks at which module is present before then.
-
-      iex> Fp3Camera.setup(:rear)
-      :ok
-      iex> {:ok, info} = Fp3Camera.info(:rear)
-      iex> {info.sensor, info.width, info.height, info.bayer}
-      {"imx363 3-0010", 4032, 3024, "rggb"}
+      iex> Fp3Camera.info(:rear)
+      {:ok, %{camera: :rear, sensor: "s5kgm1sp", lens: "dw9800w",
+              width: 3992, height: 3000, binned: {1992, 1500}, id: "/base/..."}}
   """
   @spec info(camera()) :: {:ok, map()} | {:error, term()}
-  def info(camera), do: Manager.info(camera)
+  def info(camera), do: Camera.info(camera)
 
   @doc """
-  Capture a single still and save it as JPEG at `path`.
-
-  Returns `{:ok, path}` on success.
+  Capture a still and save it as JPEG at `path`. Returns `{:ok, path}`.
 
   ## Options
 
+    * `:binned` — use the sensor's binned mode: the same field of view at
+      a quarter of the pixels, much faster (default `false`)
+    * `:width`, `:height` — scale to this size; giving one keeps the
+      aspect ratio
     * `:quality` — JPEG quality, 1..100 (default `90`)
-    * `:width`, `:height` — output size; if omitted the sensor's
-      native resolution is used (heavy: ~5 MB JPEG at full res). Set
-      e.g. `width: 1280, height: 960` for a normal-sized photo.
+    * `:frames` — frames to let auto exposure settle before the one
+      that is kept (default `30`)
+    * picture settings, see `Fp3Camera.Pipeline`
   """
   @spec snap(camera(), Path.t(), keyword()) :: {:ok, Path.t()} | {:error, term()}
-  def snap(camera, path, opts \\ []),
-    do: Capture.snap(camera, path, with_defaults(opts))
+  def snap(camera, path, opts \\ []), do: Still.snap(camera, path, opts)
 
   @doc """
-  Capture a still and return the JPEG as a binary (no file).
+  Capture a still and return the JPEG as a binary. Takes the options of
+  `snap/3`.
 
-  Convenient for downstream processing — Evision, Image, HTTP responses:
-
-      {:ok, jpg} = Fp3Camera.snap_bytes(:rear, focus: :auto)
-      mat = Evision.imdecode(jpg, Evision.Constant.cv_IMREAD_COLOR())
+      {:ok, jpg} = Fp3Camera.snap_bytes(:rear, binned: true)
   """
   @spec snap_bytes(camera(), keyword()) :: {:ok, binary()} | {:error, term()}
-  def snap_bytes(camera, opts \\ []),
-    do: Capture.snap_bytes(camera, with_defaults(opts))
+  def snap_bytes(camera, opts \\ []), do: Still.snap_bytes(camera, opts)
 
   @doc """
   Start a live H.264 stream from `camera`, served over TCP. Returns a
-  reference you pass back to `stop_stream/1`.
+  reference for `stop_stream/1`.
 
-  It is a raw H.264 elementary stream on a plain TCP socket — not MJPEG
-  and not HTTP, so a browser cannot open it. View it with a player that
-  can demux a bare stream:
+  It is a raw H.264 stream on a plain TCP socket, not HTTP, so a browser
+  cannot open it. View it with
 
       ffplay tcp://<device>:<port>
       mpv    tcp://<device>:<port>
-      vlc --demux=h264 tcp://<device>:<port>
 
-  The encoder is Venus H.264 at the sensor's binned resolution, capped
-  at 1080p — 1920x1080 on the Fairphone 3+ and on the Fairphone 3's
-  rear camera, less on its 1440x1080 front sensor.
+  A viewer can connect at any time: every second starts with a keyframe.
 
   ## Options
 
-    * `:port` — TCP port to listen on (default `8080`)
-    * `:width`, `:height` — output frame size (default `1280×960`)
-    * `:framerate` — target fps (default `15`)
-    * `:quality` — JPEG quality, 1..100 (default `70`)
+    * `:port` — TCP port (default `8888` for `:rear`, `8890` for `:front`)
+    * `:width`, `:height` — frame size (default `1280×960`), scaled from
+      the binned sensor mode
+    * `:framerate` — frames per second asked of the sensor (default `30`)
+    * picture settings, see `Fp3Camera.Pipeline`
   """
   @spec start_stream(camera(), keyword()) :: {:ok, reference()} | {:error, term()}
-  def start_stream(camera, opts \\ []),
-    do: Capture.start_stream(camera, with_defaults(opts))
+  def start_stream(camera, opts \\ []), do: Streams.start(camera, opts)
 
-  @doc "Stop a stream previously started with `start_stream/2`."
+  @doc "Stop a stream started with `start_stream/2`."
   @spec stop_stream(reference()) :: :ok
-  def stop_stream(ref), do: Capture.stop_stream(ref)
-
-  @doc """
-  Live-tune a running stream's color pipeline in-place — no restart, no
-  dropped frames. Sends commands over cam-stream's control socket on
-  port `(stream.port + 1)`.
-
-  Honored keys (all match the corresponding `start_stream/2` options):
-
-    * `:wb` — `{r_gain, g_gain, b_gain}` floats; G is implicit 1.0
-    * `:gamma`, `:contrast`, `:saturation`, `:brightness` — floats
-    * `:exposure`, `:gain` — integers; reprogrammed on the sensor subdev
-    * `:focus` — integer 0..1023 (rear only; 0=∞, 1023=macro)
-
-  ## Example
-
-      {:ok, ref} = Fp3Camera.start_stream(:rear, port: 8888)
-      # tweak while watching mpv:
-      Fp3Camera.tune(ref, wb: {1.8, 1.0, 1.4}, gamma: 1.6)
-  """
-  @spec tune(reference(), keyword()) :: :ok | {:error, term()}
-  def tune(ref, opts), do: Capture.tune(ref, opts)
+  def stop_stream(ref), do: Streams.stop(ref)
 
   @doc "List active streams."
   @spec streams() :: [%{ref: reference(), camera: camera(), port: pos_integer()}]
-  def streams, do: Capture.list_streams()
+  def streams, do: Streams.list()
 
   @doc """
-  Run the end-to-end self-test: detect, setup, still and live stream for
-  every fitted camera, judged on bytes rather than on exit codes.
-
-  Prints a table and returns the structured results.
-
-      iex> Fp3Camera.selftest()
-
-  See `Fp3Camera.Diagnostics` for options.
-  """
-  def selftest(opts \\ []), do: Fp3Camera.Diagnostics.run(opts)
-
-  @doc """
-  Capture, and return what cam-snap measured and decided.
-
-  The raw per-channel means come straight off the sensor and the gains
-  are what the pipeline applied, so white balance can be calibrated as a
-  loop here instead of by copying JPEGs to a laptop:
-
-      iex> {:ok, s} = Fp3Camera.snap_stats(:rear)
-      iex> s.raw
-      %{bayer: "rggb", r: 113.6, g: 146.0, b: 114.1}
-      iex> Fp3Camera.snap_stats(:rear, wb: {s.raw.g / s.raw.r, 1.0, s.raw.g / s.raw.b})
-
-  Accepts every option `snap/3` does, plus `:path`.
-  """
-  defdelegate snap_stats(camera, opts \\ []), to: Capture
-
-  @doc """
-  Subscribe to a live NV12 frame feed. Starts a supervised cam-stream
-  in its `--out-nv12` mode and forwards each frame to the calling
+  Subscribe to a live NV12 frame feed. Each frame is sent to the calling
   process as
 
-      {:camera_frame, %{format: :nv12, width: 1920, height: 1080,
-                        camera: :rear, data: <<3.1 MB binary>>}}
+      {:camera_frame, %{format: :nv12, width: 1280, height: 960,
+                        camera: :rear, data: <<1_843_200 bytes>>}}
 
   Decode straight to an Evision Mat:
 
       def handle_info({:camera_frame, %{format: :nv12, width: w,
                                         height: h, data: nv12}}, state) do
-        # NV12 is laid out as Y plane (h × w) + UV plane (h/2 × w),
+        # NV12 is a Y plane (h × w) followed by a UV plane (h/2 × w),
         # which OpenCV sees as a single (h * 1.5) × w u8 Mat.
         mat = Evision.Mat.from_binary(nv12, {:u, 8}, div(h * 3, 2), w, 1)
         bgr = Evision.cvtColor(mat, Evision.Constant.cv_COLOR_YUV2BGR_NV12())
-        # … run inference, save, whatever …
         {:noreply, state}
       end
 
-  Returns `{:ok, pid}`. Pass that pid to `unsubscribe/1` to stop, or
-  let your subscriber process exit — the Subscriber GenServer monitors
-  the subscriber and shuts the cam-stream Port down automatically.
-
-  Pipeline knobs (`:saturation`, `:gamma`, `:contrast`, `:brightness`,
-  `:wb`, `:exposure`, `:gain`) work the same way as `start_stream/2`.
+  Returns `{:ok, pid}`. Pass the pid to `unsubscribe/1`, or let the
+  calling process exit. Takes the options of `start_stream/2` except
+  `:port`.
   """
   @spec subscribe(camera(), keyword()) :: {:ok, pid()} | {:error, term()}
   def subscribe(camera, opts \\ []) do
-    with :ok <- Manager.setup(camera) do
-      opts =
-        with_defaults(opts)
-        |> Keyword.put(:camera, camera)
-        |> Keyword.put(:subscriber, self())
-
-      DynamicSupervisor.start_child(
-        Fp3Camera.StreamSupervisor,
-        {Fp3Camera.Subscriber, opts}
-      )
-    end
+    opts = opts |> Keyword.put(:camera, camera) |> Keyword.put(:subscriber, self())
+    DynamicSupervisor.start_child(Fp3Camera.StreamSupervisor, {Fp3Camera.Subscriber, opts})
   end
 
-  @doc "Stop a frame subscription previously started with `subscribe/2`."
+  @doc "Stop a frame subscription started with `subscribe/2`."
   @spec unsubscribe(pid()) :: :ok
   def unsubscribe(pid) when is_pid(pid), do: Fp3Camera.Subscriber.stop(pid)
 end

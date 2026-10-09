@@ -1,32 +1,45 @@
 defmodule Fp3Camera.Subscriber do
   @moduledoc """
-  Per-subscription GenServer that owns a `cam-stream --out-nv12` Port and
-  forwards each NV12 frame to a subscriber process as
+  Per-subscription GenServer that runs a gst-launch pipeline writing NV12
+  frames to stdout and forwards each frame to a subscriber process as
 
-      {:camera_frame, %{
-        format: :nv12,
-        width: 1920,
-        height: 1080,
-        data: <<3_110_400 bytes>>
-      }}
+      {:camera_frame, %{format: :nv12, width: 1280, height: 960,
+                        camera: :rear, data: <<1_843_200 bytes>>}}
 
   Use `Fp3Camera.subscribe/2` / `Fp3Camera.unsubscribe/1` rather than
   starting this directly.
 
-  Backpressure: if the subscriber can't drain frames fast enough the OS
-  pipe buffer fills and cam-stream blocks on `write`, which then drops
-  V4L2 capture frames at the sensor side. No unbounded memory growth.
+  A subscriber that falls behind misses frames: one is dropped whenever
+  the subscriber already has two waiting in its mailbox.
 
   When the subscriber process exits, the Subscriber follows it down.
   """
-  use GenServer, restart: :transient
-  require Logger
+  use GenServer, restart: :temporary
 
-  @cam_stream "/usr/bin/cam-stream"
-  # NV12 1920×1080: Y plane (W*H) + interleaved UV plane (W*H/2)
-  @width 1920
-  @height 1080
-  @frame_size div(@width * @height * 3, 2)
+  alias Fp3Camera.{Camera, Config, Pipeline, Streams}
+
+  defmodule Sink do
+    @moduledoc false
+    # Forwards the command's output, as it arrives, to `pid`.
+    defstruct [:pid]
+
+    defimpl Collectable do
+      def into(sink) do
+        {sink,
+         fn
+           sink, {:cont, data} ->
+             send(sink.pid, {:nv12, data})
+             sink
+
+           sink, :done ->
+             sink
+
+           _sink, :halt ->
+             :ok
+         end}
+      end
+    end
+  end
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
 
@@ -36,138 +49,81 @@ defmodule Fp3Camera.Subscriber do
   def init(opts) do
     camera = Keyword.fetch!(opts, :camera)
     subscriber = Keyword.fetch!(opts, :subscriber)
+    opts = Config.resolve(camera, :stream, opts)
+    {w, h} = {Keyword.get(opts, :width, 1280), Keyword.get(opts, :height, 960)}
 
-    args =
-      ["--camera", to_string(camera), "--out-nv12"] ++ build_extras(opts)
+    with {:ok, info} <- Camera.info(camera),
+         :ok <- Streams.claim(camera, self()) do
+      Process.flag(:trap_exit, true)
+      Process.monitor(subscriber)
+      args = Pipeline.frames(info, {w, h}, opts)
+      me = self()
 
-    Process.flag(:trap_exit, true)
-    Process.monitor(subscriber)
+      task =
+        spawn_link(fn ->
+          MuonTrap.cmd("gst-launch-1.0", args,
+            into: %Sink{pid: me},
+            env: [{"LIBCAMERA_LOG_LEVELS", "*:ERROR"}]
+          )
+        end)
 
-    port =
-      Port.open({:spawn_executable, @cam_stream}, [
-        :binary,
-        :exit_status,
-        :stderr_to_stdout,
-        {:args, args}
-      ])
-
-    Logger.info(
-      "Fp3Camera.Subscriber: started cam-stream #{camera} → pid=#{inspect(subscriber)}"
-    )
-
-    {:ok,
-     %{
-       camera: camera,
-       subscriber: subscriber,
-       port: port,
-       # iolist of pending bytes — avoids O(N²) `buf <> data` on the
-       # 3.1 MB-per-frame NV12 stream. Bytes are flattened into a flat
-       # binary only at frame boundaries.
-       buf: [],
-       buf_bytes: 0,
-       frames_sent: 0,
-       started_at: System.monotonic_time(:millisecond)
-     }}
+      {:ok,
+       %{
+         camera: camera,
+         subscriber: subscriber,
+         task: task,
+         width: w,
+         height: h,
+         frame_size: div(w * h * 3, 2),
+         buffer: <<>>
+       }}
+    else
+      {:error, reason} -> {:stop, reason}
+    end
   end
 
   @impl true
-  def handle_info({port, {:data, data}}, %{port: port} = state) do
-    state = %{
-      state
-      | buf: [state.buf | data],
-        buf_bytes: state.buf_bytes + byte_size(data)
-    }
-
-    state = drain_frames(state)
-    {:noreply, state}
+  def handle_info({:nv12, data}, state) do
+    {frames, rest} = chop(state.buffer <> data, state.frame_size, [])
+    Enum.each(frames, &deliver(state, &1))
+    {:noreply, %{state | buffer: rest}}
   end
 
-  def handle_info({port, {:exit_status, status}}, %{port: port} = state) do
-    Logger.warning(
-      "Fp3Camera.Subscriber: cam-stream(#{state.camera}) exited #{status}"
-    )
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, %{subscriber: pid} = state),
+    do: {:stop, :normal, state}
 
-    {:stop, :normal, state}
-  end
-
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, %{subscriber: pid} = state) do
-    Logger.info("Fp3Camera.Subscriber: subscriber #{inspect(pid)} died, stopping")
-    {:stop, :normal, state}
-  end
-
+  # The pipeline ended: the camera failed or was taken away.
+  def handle_info({:EXIT, pid, _reason}, %{task: pid} = state), do: {:stop, :normal, state}
   def handle_info(_msg, state), do: {:noreply, state}
 
+  # Killing the task closes MuonTrap's port, which stops gst-launch.
   @impl true
-  def terminate(_reason, %{port: port}) do
-    if Port.info(port) do
-      case Port.info(port, :os_pid) do
-        {:os_pid, pid} -> System.cmd("kill", ["-TERM", Integer.to_string(pid)])
-        _ -> :ok
-      end
+  def terminate(_reason, state), do: Process.exit(state.task, :kill)
 
-      try do
-        Port.close(port)
-      catch
-        _, _ -> :ok
-      end
+  defp chop(bin, size, acc) when byte_size(bin) >= size do
+    <<frame::binary-size(^size), rest::binary>> = bin
+    chop(rest, size, [frame | acc])
+  end
+
+  defp chop(bin, _size, acc), do: {Enum.reverse(acc), bin}
+
+  defp deliver(state, frame) do
+    case Process.info(state.subscriber, :message_queue_len) do
+      {:message_queue_len, n} when n < 2 ->
+        send(
+          state.subscriber,
+          {:camera_frame,
+           %{
+             format: :nv12,
+             width: state.width,
+             height: state.height,
+             camera: state.camera,
+             data: frame
+           }}
+        )
+
+      _ ->
+        :dropped
     end
-
-    :ok
-  end
-
-  ## Internals
-
-  # Slice complete @frame_size-sized chunks off the iolist buffer, send
-  # each one to the subscriber. Only flattens to a binary once we know
-  # at least one full frame's bytes have arrived — keeps the hot path
-  # O(N) per frame rather than O(N²).
-  defp drain_frames(%{buf_bytes: bytes} = state) when bytes >= @frame_size do
-    flat = IO.iodata_to_binary(state.buf)
-    {frames, rest} = chop(flat, [])
-    Enum.each(frames, &send_frame(state, &1))
-
-    %{
-      state
-      | buf: [rest],
-        buf_bytes: byte_size(rest),
-        frames_sent: state.frames_sent + length(frames)
-    }
-  end
-
-  defp drain_frames(state), do: state
-
-  defp chop(bin, acc) when byte_size(bin) >= @frame_size do
-    <<frame::binary-size(@frame_size), rest::binary>> = bin
-    chop(rest, [frame | acc])
-  end
-
-  defp chop(bin, acc), do: {Enum.reverse(acc), bin}
-
-  defp send_frame(state, frame) do
-    send(
-      state.subscriber,
-      {:camera_frame,
-       %{
-         format: :nv12,
-         width: @width,
-         height: @height,
-         camera: state.camera,
-         data: frame
-       }}
-    )
-  end
-
-  defp build_extras(opts) do
-    Enum.flat_map(opts, fn
-      {:exposure, n} when is_integer(n) -> ["--exposure", to_string(n)]
-      {:gain, n} when is_integer(n) -> ["--gain", to_string(n)]
-      {:saturation, f} -> ["--saturation", to_string(f)]
-      {:gamma, f} -> ["--gamma", to_string(f)]
-      {:contrast, f} -> ["--contrast", to_string(f)]
-      {:brightness, f} -> ["--brightness", to_string(f)]
-      {:wb, {r, g, b}} -> ["--wb", to_string(r), to_string(g), to_string(b)]
-      {:no_autofocus, true} -> ["--no-autofocus"]
-      _ -> []
-    end)
   end
 end

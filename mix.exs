@@ -19,6 +19,6 @@ defmodule Fp3Camera.MixProject do
   end
 
   defp deps do
-    []
+    [{:muontrap, "~> 1.5"}]
   end
 end

@@ -8,14 +8,11 @@ defmodule Fp3Camera.Application do
     Fp3Camera.Config.load()
 
     children = [
-      Fp3Camera.Manager,
-      Fp3Camera.Capture,
-      # Supervises Fp3Camera.Subscriber processes — one per call to
-      # Fp3Camera.subscribe/2. Crashes / subscriber exits clean up here.
-      {DynamicSupervisor,
-       name: Fp3Camera.StreamSupervisor, strategy: :one_for_one}
+      # Stream pipelines and frame subscribers run here.
+      {DynamicSupervisor, name: Fp3Camera.StreamSupervisor, strategy: :one_for_one},
+      Fp3Camera.Streams
     ]
 
-    Supervisor.start_link(children, strategy: :one_for_one, name: Fp3Camera.Supervisor)
+    Supervisor.start_link(children, strategy: :rest_for_one, name: Fp3Camera.Supervisor)
   end
 end
