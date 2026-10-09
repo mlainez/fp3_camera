@@ -42,14 +42,19 @@ defmodule Fp3Camera.Pipeline do
     # No bitrate: Venus ignores the target here, and a low one stalls it.
     controls = "controls,video_gop_size=#{Keyword.get(opts, :gop, fps)}"
 
-    # Venus sometimes stops returning frames mid-stream. The watchdog then
-    # fails the pipeline, and closing the session restarts the firmware.
+    # The converter writes to system memory and the encoder copies each
+    # frame into its own buffers: writing the converted frame straight into
+    # those uncached buffers is what limits the stream, to 20 fps or less.
+    #
+    # If Venus stops returning frames, the watchdog fails the pipeline and
+    # closing the session restarts the firmware.
     #
     # Each IDR frame carries SPS and PPS, so a viewer that joins mid-GOP
     # can decode from the next one. Holding new viewers back until a
     # keyframe (sync-method=*-keyframe) stalls this pipeline.
     ["-e" | source(info, info.binned, opts, fps)] ++
       scale(info.binned, out, "format=NV12,") ++
+      ["!", "identity", "drop-allocation=true"] ++
       ["!", "v4l2h264enc", "extra-controls=#{controls}"] ++
       ~w(! watchdog timeout=4000 ! h264parse config-interval=-1
          ! tcpserversink host=0.0.0.0 port=#{Keyword.fetch!(opts, :port)} sync=false)
