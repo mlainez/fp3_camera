@@ -77,7 +77,7 @@ defmodule Fp3Camera.Pipeline do
 
   @doc """
   Environment for gst-launch-1.0 running a pipeline of `out` from `info`:
-  full-resolution outputs get four debayer threads instead of two.
+  full-resolution outputs get eight debayer threads instead of two.
   """
   def env(info, out) do
     base = [{"LIBCAMERA_LOG_LEVELS", "*:ERROR"}]
