@@ -112,16 +112,41 @@ defmodule Fp3Camera.Pipeline do
       "controls,video_gop_size=#{Keyword.get(opts, :gop, fps)}," <>
         "video_bitrate=#{Keyword.get(opts, :bitrate, 8_000_000)}"
 
+    # Venus encodes the camera's buffers in place when stream_env/2 has
+    # them laid out for it, and copies each frame into its own otherwise.
+    #
     # If Venus stops returning frames, the watchdog fails the pipeline and
     # closing the session restarts the firmware.
     #
     # Each IDR frame carries SPS and PPS, so a viewer that joins mid-GOP
     # can decode from the next one. Holding new viewers back until a
     # keyframe (sync-method=*-keyframe) stalls this pipeline.
+    import = if in_place?(info, out), do: ["output-io-mode=dmabuf-import"], else: []
+
     ["-e" | source(info, out, opts, fps)] ++
-      ~w(! v4l2h264enc extra-controls=#{controls}
+      ["!", "v4l2h264enc" | import] ++
+      ~w(extra-controls=#{controls}
          ! watchdog timeout=4000 ! h264parse config-interval=-1
          ! tcpserversink host=0.0.0.0 port=#{Keyword.fetch!(opts, :port)} sync=false)
+  end
+
+  @doc """
+  Environment for gst-launch-1.0 running stream/3: frames Venus can
+  encode in place are laid out for it.
+  """
+  def stream_env(info, out) do
+    if in_place?(info, out),
+      do: [{"XDG_CONFIG_HOME", Application.app_dir(:fp3_camera, "priv/encoder")} | env()],
+      else: env()
+  end
+
+  # Venus reads NV12 lines padded to 128 bytes and the chroma plane at
+  # the luma height rounded up to 32 lines. The pipeline handler pads the
+  # height when the sensor mode has the lines to spare; the width it
+  # takes as it is.
+  defp in_place?(info, {w, h} = out) do
+    {_mw, mh} = sensor_mode(info, out)
+    rem(w, 128) == 0 and 32 * div(h + 31, 32) <= mh
   end
 
   @doc "Raw NV12 frames on stdout."

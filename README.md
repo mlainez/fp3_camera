@@ -70,9 +70,13 @@ keyframe, so a viewer can connect at any time.
 By default a stream is 1920x1080 at 30 fps and 8 Mbit/s. Both cameras
 hold 30 fps; the rear one also streams 1080p at 60 fps
 (`framerate: 60`) and 3840x2160 at 30 fps. The sensor runs at the
-stream's frame rate, which also bounds the exposure time. A 1080p
-stream at 30 fps keeps about 12% of the eight cores busy, 4K at 30 fps
-or 1080p at 60 about 18%, most of it copying frames into the encoder.
+stream's frame rate, which also bounds the exposure time.
+
+Venus encodes the camera's buffers in place when the width is a multiple
+of 128 and the sensor mode has lines to spare below the frame, as for
+1280x720, 1920x1080 and 3840x2160. A 1080p or 4K stream at 30 fps then
+keeps about 6% of the eight cores busy, 1080p at 60 fps about 8%. Other
+sizes are copied into the encoder, which costs about twice that.
 
 ```elixir
 {:ok, ref} = Fp3Camera.start_stream(:rear, width: 1280, height: 960, bitrate: 4_000_000)

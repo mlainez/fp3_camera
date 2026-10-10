@@ -46,6 +46,7 @@ defmodule Fp3Camera.Streams do
         camera: camera,
         port: opts[:port],
         args: Pipeline.stream(info, out, opts),
+        env: Pipeline.stream_env(info, out),
         restarts: 0
       }
 
@@ -136,7 +137,7 @@ defmodule Fp3Camera.Streams do
          [
            "gst-launch-1.0",
            stream.args,
-           [env: Pipeline.env(), stderr_to_stdout: true, log_output: :info]
+           [env: stream.env, stderr_to_stdout: true, log_output: :info]
          ]}
     }
 

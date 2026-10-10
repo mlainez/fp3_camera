@@ -1,0 +1,9 @@
+%YAML 1.1
+---
+# libcamera configuration for streams Venus encodes: the camss pipeline
+# handler lays NV12 frames out the way the encoder reads them, so it
+# imports them instead of copying each one.
+version: 1
+configuration:
+  camss:
+    nv12_plane_alignment: 32

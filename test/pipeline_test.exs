@@ -4,6 +4,7 @@ defmodule Fp3Camera.PipelineTest do
   alias Fp3Camera.Pipeline
 
   @rear %{
+    id: "rear",
     sensor: "s5kgm1sp",
     width: 4000,
     height: 3000,
@@ -12,6 +13,7 @@ defmodule Fp3Camera.PipelineTest do
   }
 
   @front %{
+    id: "front",
     sensor: "s5k3p9sp",
     width: 2304,
     height: 1728,
@@ -71,6 +73,27 @@ defmodule Fp3Camera.PipelineTest do
     test "refuses rates that are not positive integers" do
       assert {:error, _} = Pipeline.check_framerate(@rear, {1920, 1080}, 0)
       assert {:error, _} = Pipeline.check_framerate(@rear, {1920, 1080}, 29.97)
+    end
+  end
+
+  describe "stream/3" do
+    test "has Venus encode frames in place when the ISP can lay them out for it" do
+      for {info, out} <- [
+            {@rear, {1920, 1080}},
+            {@rear, {3840, 2160}},
+            {@front, {2304, 1728}},
+            {@front, {1920, 1080}}
+          ] do
+        assert "output-io-mode=dmabuf-import" in Pipeline.stream(info, out, port: 8888)
+        assert List.keymember?(Pipeline.stream_env(info, out), "XDG_CONFIG_HOME", 0)
+      end
+    end
+
+    test "copies frames whose lines Venus pads or whose mode has no lines to spare" do
+      for {info, out} <- [{@rear, {1440, 1080}}, {@rear, {2000, 1500}}, {@rear, {3840, 3000}}] do
+        refute "output-io-mode=dmabuf-import" in Pipeline.stream(info, out, port: 8888)
+        refute List.keymember?(Pipeline.stream_env(info, out), "XDG_CONFIG_HOME", 0)
+      end
     end
   end
 
