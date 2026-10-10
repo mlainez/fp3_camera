@@ -137,10 +137,10 @@ defmodule Fp3Camera do
     * `:port` — TCP port (default `8888` for `:rear`, `8890` for `:front`)
     * `:width`, `:height` — frame size (default `1920×1080`), cropped to
       that aspect ratio and scaled from the binned sensor mode
-    * `:framerate` — frames per second (default `30`). The front sensor
-      tops out at 30; the rear one reaches about 50 at 1080p and 60 at
-      720p when the light allows a short exposure, and 17 at 3840×2160,
-      where the encoder is at its top clock.
+    * `:framerate` — frames per second (default `30`). The sensor runs
+      at this rate, which also bounds the exposure. The front sensor tops
+      out at 30; the rear one reaches 60 at 1080p and about 27 at
+      3840×2160, close to its 28.7 at full resolution.
     * `:bitrate` — bits per second (default `8_000_000`)
     * picture settings, see `Fp3Camera.Pipeline`
   """

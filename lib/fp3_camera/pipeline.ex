@@ -24,8 +24,10 @@ defmodule Fp3Camera.Pipeline do
     * `:gain` — `:auto`, or the analogue gain as a multiplier
     * `:focus` — `:auto`, or 0 (far) to 1023 (close) on the rear lens
 
-  `:denoise`, `:warm_bias` and `:lsc` are accepted and ignored: libcamera
-  has no such controls.
+  libcamera's software ISP acts on `:gamma`, `:contrast` and `:saturation`
+  and runs its own exposure, gain and white balance; it ignores the other
+  settings for now. `:denoise`, `:warm_bias` and `:lsc` are accepted and
+  ignored: libcamera has no such controls.
   """
 
   @doc "A JPEG still of `size`, scaled to `out` when that differs."
@@ -56,8 +58,8 @@ defmodule Fp3Camera.Pipeline do
     # keyframe (sync-method=*-keyframe) stalls this pipeline.
     {size, format} = nv12_source(sensor_mode(info, out), out)
 
-    # libcamera can run the sensor faster than asked, and the encoder
-    # budgets its bitrate for the frame rate it is given.
+    # The encoder budgets its bitrate for the frame rate it is given, and
+    # libcamera only slows the sensor down to that rate within its mode.
     ["-e" | source(info, size, opts, fps, format)] ++
       ["!", "videorate", "drop-only=true", "max-rate=#{fps}"] ++
       to_nv12(size, out, format) ++
