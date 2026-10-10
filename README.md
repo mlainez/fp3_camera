@@ -95,9 +95,8 @@ recovers its firmware when it stops answering.
   `{:error, :busy}`.
 - Demosaicing runs on the CPU, which keeps up with the sensors up to 4K
   at 30 fps.
-- Exposure, gain and white balance are automatic: the software ISP
-  ignores `:exposure`, `:gain`, `:awb`, `:wb`, `:brightness`,
-  `:sharpen` and `:focus` for now.
+- The software ISP ignores `:brightness`, `:sharpen` and `:focus` for
+  now.
 - When the Venus firmware stops answering, the kernel restarts it and the
   stream starts again on its own a few seconds later.
 
