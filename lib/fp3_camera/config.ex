@@ -20,6 +20,10 @@ defmodule Fp3Camera.Config do
 
   @store "/root/fp3-camera.config"
 
+  # What a saved file keeps; settings older versions took are dropped
+  @kept Fp3Camera.Pipeline.settings() ++
+          [:binned, :width, :height, :quality, :frames, :framerate, :bitrate, :gop]
+
   @doc """
   The merged options for `camera` in `mode` (`:snap` or `:stream`),
   with `opts` from the call site winning over everything.
@@ -43,7 +47,7 @@ defmodule Fp3Camera.Config do
 
   Merges into what is already set; a key with `nil` clears it.
 
-      Fp3Camera.Config.put({:rear, :snap}, gamma: 2.0, saturation: 1.8)
+      Fp3Camera.Config.put({:rear, :snap}, exposure: 20_000, gain: 2.0)
   """
   def put(scope, opts) when is_list(opts) do
     key = normalise(scope)
@@ -81,6 +85,7 @@ defmodule Fp3Camera.Config do
   def load(path \\ @store) do
     with {:ok, bin} <- File.read(path),
          {:ok, map} <- safe_decode(bin) do
+      map = Map.new(map, fn {scope, opts} -> {scope, Keyword.take(opts, @kept)} end)
       Application.put_env(:fp3_camera, :runtime_config, map)
       {:ok, map}
     else

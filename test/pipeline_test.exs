@@ -5,6 +5,8 @@ defmodule Fp3Camera.PipelineTest do
 
   @rear %{
     id: "rear",
+    lens: "dw9800w",
+    pixel_array: {8, 8, 7992, 5992},
     sensor: "s5kgm1sp",
     width: 4000,
     height: 3000,
@@ -14,6 +16,8 @@ defmodule Fp3Camera.PipelineTest do
 
   @front %{
     id: "front",
+    lens: nil,
+    pixel_array: {16, 24, 4624, 3456},
     sensor: "s5k3p9sp",
     width: 2304,
     height: 1728,
@@ -85,14 +89,14 @@ defmodule Fp3Camera.PipelineTest do
             {@front, {1920, 1080}}
           ] do
         assert "output-io-mode=dmabuf-import" in Pipeline.stream(info, out, port: 8888)
-        assert List.keymember?(Pipeline.stream_env(info, out), "XDG_CONFIG_HOME", 0)
+        assert List.keymember?(Pipeline.stream_env(info, out, []), "XDG_CONFIG_HOME", 0)
       end
     end
 
     test "copies frames whose lines Venus pads or whose mode has no lines to spare" do
       for {info, out} <- [{@rear, {1440, 1080}}, {@rear, {2000, 1500}}, {@rear, {3840, 3000}}] do
         refute "output-io-mode=dmabuf-import" in Pipeline.stream(info, out, port: 8888)
-        refute List.keymember?(Pipeline.stream_env(info, out), "XDG_CONFIG_HOME", 0)
+        refute List.keymember?(Pipeline.stream_env(info, out, []), "XDG_CONFIG_HOME", 0)
       end
     end
   end
@@ -106,9 +110,53 @@ defmodule Fp3Camera.PipelineTest do
     test "maps the lens position onto dioptres" do
       assert Pipeline.controls(focus: 1023) == ["af-mode=manual", "lens-position=10.0000"]
     end
+  end
 
-    test "drops settings the ISP does not apply" do
-      assert Pipeline.controls(gamma: 2.2, saturation: 1.5, sharpen: false) == []
+  describe "check_settings/4" do
+    test "takes the settings the ISP applies and the call's own options" do
+      opts = [
+        awb: false,
+        wb: {2.0, 1.0, 1.6},
+        exposure: 20_000,
+        gain: 2.0,
+        focus: 300,
+        quality: 80
+      ]
+
+      assert Pipeline.check_settings(@rear, {1920, 1080}, opts, [:quality]) == :ok
+    end
+
+    test "refuses settings that do nothing and values out of range" do
+      assert {:error, {:bad_setting, :gamma, _}} =
+               Pipeline.check_settings(@rear, {1920, 1080}, [gamma: 2.2], [])
+
+      assert {:error, {:bad_setting, :gain, "out of range"}} =
+               Pipeline.check_settings(@rear, {1920, 1080}, [gain: 40], [])
+    end
+
+    test "refuses focus on a fixed-focus camera" do
+      assert {:error, {:bad_setting, :focus, "this camera has a fixed-focus lens"}} =
+               Pipeline.check_settings(@front, {1920, 1080}, [focus: 300], [])
+    end
+
+    test "holds zoom to what the ISP reaches at the output size" do
+      assert Pipeline.max_zoom(@rear, {1920, 1080}) == 2.08
+      assert Pipeline.check_settings(@rear, {1920, 1080}, [zoom: 2.0], []) == :ok
+
+      assert {:error, {:bad_setting, :zoom, "at most 1.04x at 3840x2160"}} =
+               Pipeline.check_settings(@rear, {3840, 2160}, [zoom: 1.5], [])
+    end
+  end
+
+  describe "zoom" do
+    test "runs the largest mode and crops the middle of the pixel array" do
+      args = Pipeline.still(@rear, {1920, 1080}, zoom: 2.0)
+      assert "sensor-config=sensor/config,width=4000,height=3000,depth=10" in args
+      assert "scaler-crop=<2006,1506,3996,2996>" in args
+    end
+
+    test "lists the sizes a camera produces" do
+      assert Pipeline.sizes(@front) == [{2304, 1728}, {1920, 1080}, {1280, 720}, {640, 480}]
     end
   end
 end

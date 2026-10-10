@@ -11,6 +11,8 @@ defmodule Fp3Camera.Streams do
 
   @default_ports %{rear: 8888, front: 8890}
 
+  @options [:port, :width, :height, :framerate, :bitrate, :gop]
+
   # When Venus stops answering, the kernel restarts its firmware and the
   # stream that hit it dies; starting it again a moment later works. A
   # stream that ran for a minute gets its restarts back.
@@ -39,14 +41,21 @@ defmodule Fp3Camera.Streams do
     with :ok <- idle(state, camera),
          {:ok, info} <- Camera.info(camera),
          :ok <- Pipeline.check_size(info, out),
-         :ok <- Pipeline.check_framerate(info, out, Keyword.get(opts, :framerate, 30)) do
+         :ok <- Pipeline.check_settings(info, out, opts, @options),
+         :ok <-
+           Pipeline.check_framerate(
+             info,
+             out,
+             Keyword.get(opts, :framerate, 30),
+             Keyword.get(opts, :zoom, 1)
+           ) do
       ref = make_ref()
 
       stream = %{
         camera: camera,
         port: opts[:port],
         args: Pipeline.stream(info, out, opts),
-        env: Pipeline.stream_env(info, out),
+        env: Pipeline.stream_env(info, out, opts),
         restarts: 0
       }
 

@@ -30,14 +30,17 @@ defmodule Fp3Camera.Pipeline do
     * `:awb` — `true` for automatic white balance, `false` to hold it
     * `:wb` — `{r, g, b}` gains, which turns automatic white balance off
     * `:exposure` — `:auto`, or the exposure time in microseconds
-    * `:gain` — `:auto`, or the analogue gain as a multiplier
-    * `:focus` — `:auto`, or 0 (far) to 1023 (close) on a camera with a
-      focus motor
+    * `:gain` — `:auto`, or the analogue gain as a multiplier, 1 to 16
+    * `:focus` — 0 (far) to 1023 (close), on a camera with a focus motor;
+      the lens stays where it is otherwise
+    * `:zoom` — digital zoom from 1.0, the whole view, up to `max_zoom/2`
 
-  The ISP's tone curve is fixed to sRGB, so `:gamma`, `:contrast`,
-  `:saturation`, `:brightness`, `:sharpen`, `:denoise`, `:warm_bias` and
-  `:lsc` are accepted and not applied. `focus: :auto` leaves the lens
-  where it is: there is no autofocus yet.
+  Zoom runs the sensor's largest mode and has the ISP crop its middle and
+  scale it down to the output. The ISP does not scale up, so zoom stops
+  where that crop shrinks to the output's own size. It is set when the
+  capture starts.
+
+  `check_settings/4` refuses any other key, and values out of range.
   """
 
   # The ISP's largest downscale, and the alignment of its output lines
@@ -46,6 +49,76 @@ defmodule Fp3Camera.Pipeline do
 
   # The fastest each sensor mode runs; the others reach 30
   @max_framerate %{{"s5kgm1sp", {2000, 1500}} => 60}
+
+  @settings [:awb, :wb, :exposure, :gain, :focus, :zoom]
+
+  # Output sizes offered besides each camera's own modes
+  @presets [{3840, 2160}, {2560, 1440}, {1920, 1080}, {1280, 720}, {640, 480}]
+
+  @doc "The picture settings `check_settings/4` takes."
+  def settings, do: @settings
+
+  @doc """
+  The output sizes `info`'s camera produces from its full and binned
+  modes and a few common video sizes, largest first.
+  """
+  @spec sizes(map()) :: [{pos_integer(), pos_integer()}]
+  def sizes(info) do
+    [{info.width, info.height}, info.binned | @presets]
+    |> Enum.uniq()
+    |> Enum.filter(&(check_size(info, &1) == :ok))
+    |> Enum.sort_by(fn {w, h} -> -w * h end)
+  end
+
+  @doc "The largest `:zoom` for an `out` sized output of `info`'s camera."
+  @spec max_zoom(map(), {pos_integer(), pos_integer()}) :: float()
+  def max_zoom(%{width: mw, height: mh}, {w, h}), do: Float.floor(min(mw / w, mh / h), 2)
+
+  @doc """
+  `:ok` when every key of `opts` is a picture setting with a value
+  `info`'s camera takes at an `out` sized output, or one of `options`,
+  the call's own options. Otherwise `{:error, {:bad_setting, key, reason}}`.
+  """
+  @spec check_settings(map(), {pos_integer(), pos_integer()}, keyword(), [atom()]) ::
+          :ok | {:error, term()}
+  def check_settings(info, out, opts, options) do
+    Enum.find_value(opts, :ok, fn {key, value} ->
+      case check_setting(info, out, key, value, options) do
+        :ok -> nil
+        reason -> {:error, {:bad_setting, key, reason}}
+      end
+    end)
+  end
+
+  defp check_setting(_info, _out, :awb, value, _) when is_boolean(value), do: :ok
+
+  defp check_setting(_info, _out, :wb, {r, g, b}, _)
+       when is_number(r) and is_number(g) and is_number(b) and r > 0 and g > 0 and b > 0,
+       do: :ok
+
+  defp check_setting(_info, _out, :exposure, us, _)
+       when us == :auto or (is_integer(us) and us > 0),
+       do: :ok
+
+  defp check_setting(_info, _out, :gain, g, _)
+       when g == :auto or (is_number(g) and g >= 1 and g <= 16),
+       do: :ok
+
+  defp check_setting(%{lens: nil}, _out, :focus, _, _), do: "this camera has a fixed-focus lens"
+  defp check_setting(_info, _out, :focus, n, _) when n in 0..1023, do: :ok
+
+  defp check_setting(info, out, :zoom, z, _) when is_number(z) and z >= 1 do
+    max = max_zoom(info, out)
+    if z <= max, do: :ok, else: "at most #{max}x at #{elem(out, 0)}x#{elem(out, 1)}"
+  end
+
+  defp check_setting(_info, _out, key, _value, options) do
+    cond do
+      key in options -> :ok
+      key in @settings -> "out of range"
+      true -> "not a setting of this camera"
+    end
+  end
 
   @doc """
   `:ok` when the ISP can produce `{w, h}` from `info`'s camera, otherwise
@@ -85,17 +158,21 @@ defmodule Fp3Camera.Pipeline do
   otherwise `{:error, {:unsupported_framerate, fps, reason}}`.
   """
   @spec check_framerate(map(), {pos_integer(), pos_integer()}, term()) :: :ok | {:error, term()}
-  def check_framerate(info, out, fps) do
-    max = Map.get(@max_framerate, {info.sensor, sensor_mode(info, out)}, 30)
+  def check_framerate(info, out, fps, zoom \\ 1) do
+    max = Map.get(@max_framerate, {info.sensor, sensor_mode(info, out, zoom)}, 30)
 
     if is_integer(fps) and fps in 1..max,
       do: :ok,
       else: {:error, {:unsupported_framerate, fps, "1 to #{max} frames per second at this size"}}
   end
 
-  # The smallest mode that covers the output, as the pipeline handler picks
-  defp sensor_mode(info, {w, h}) do
-    Enum.find(info.modes, {info.width, info.height}, fn {mw, mh} -> mw >= w and mh >= h end)
+  # The smallest mode that covers the output, as the pipeline handler
+  # picks, or the largest one to zoom into
+  defp sensor_mode(info, {w, h}, zoom) do
+    if zoom > 1,
+      do: {info.width, info.height},
+      else:
+        Enum.find(info.modes, {info.width, info.height}, fn {mw, mh} -> mw >= w and mh >= h end)
   end
 
   @doc "A JPEG still of `out`."
@@ -123,7 +200,7 @@ defmodule Fp3Camera.Pipeline do
     # Each IDR frame carries SPS and PPS, so a viewer that joins mid-GOP
     # can decode from the next one. Holding new viewers back until a
     # keyframe (sync-method=*-keyframe) stalls this pipeline.
-    import = if in_place?(info, out), do: ["output-io-mode=dmabuf-import"], else: []
+    import = if in_place?(info, out, opts), do: ["output-io-mode=dmabuf-import"], else: []
 
     ["-e" | source(info, out, opts, fps)] ++
       ["!", "v4l2h264enc" | import] ++
@@ -136,8 +213,8 @@ defmodule Fp3Camera.Pipeline do
   Environment for gst-launch-1.0 running stream/3: frames Venus can
   encode in place are laid out for it.
   """
-  def stream_env(info, out) do
-    if in_place?(info, out),
+  def stream_env(info, out, opts) do
+    if in_place?(info, out, opts),
       do: [{"XDG_CONFIG_HOME", Application.app_dir(:fp3_camera, "priv/encoder")} | env()],
       else: env()
   end
@@ -146,8 +223,8 @@ defmodule Fp3Camera.Pipeline do
   # the luma height rounded up to 32 lines. The pipeline handler pads the
   # height when the sensor mode has the lines to spare; the width it
   # takes as it is.
-  defp in_place?(info, {w, h} = out) do
-    {_mw, mh} = sensor_mode(info, out)
+  defp in_place?(info, {w, h} = out, opts) do
+    {_mw, mh} = sensor_mode(info, out, Keyword.get(opts, :zoom, 1))
     rem(w, 128) == 0 and 32 * div(h + 31, 32) <= mh
   end
 
@@ -165,8 +242,25 @@ defmodule Fp3Camera.Pipeline do
     # -f: a crash exits instead of waiting for a debugger to attach.
     # v4l2h264enc only accepts caps that name the interlace mode, which
     # libcamerasrc leaves out.
-    ["-q", "-f", "libcamerasrc", "camera-name=#{info.id}" | controls(opts)] ++
+    ["-q", "-f", "libcamerasrc", "camera-name=#{info.id}" | controls(opts) ++ zoom(info, opts)] ++
       ["!", "video/x-raw,format=NV12,width=#{w},height=#{h}#{rate},interlace-mode=progressive"]
+  end
+
+  # The largest mode, and a ScalerCrop of the middle of the pixel array
+  defp zoom(info, opts) do
+    case Keyword.get(opts, :zoom, 1) do
+      z when z > 1 ->
+        {x, y, w, h} = info.pixel_array
+        {cw, ch} = {round(w / z), round(h / z)}
+
+        [
+          "sensor-config=sensor/config,width=#{info.width},height=#{info.height},depth=10",
+          "scaler-crop=<#{x + div(w - cw, 2)},#{y + div(h - ch, 2)},#{cw},#{ch}>"
+        ]
+
+      _ ->
+        []
+    end
   end
 
   @doc "libcamerasrc properties for the picture settings in `opts`."
@@ -190,7 +284,7 @@ defmodule Fp3Camera.Pipeline do
 
   # LensPosition is in dioptres; 10 is a focus distance of 10 cm.
   defp control({:focus, n}) when is_integer(n),
-    do: ["af-mode=manual", "lens-position=#{num(min(max(n, 0), 1023) / 1023 * 10)}"]
+    do: ["af-mode=manual", "lens-position=#{num(n / 1023 * 10)}"]
 
   defp control(_other), do: []
 

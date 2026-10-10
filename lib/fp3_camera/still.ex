@@ -3,6 +3,8 @@ defmodule Fp3Camera.Still do
 
   alias Fp3Camera.{Camera, Config, Pipeline, Streams}
 
+  @options [:binned, :width, :height, :quality, :frames, :timeout]
+
   # The first frames come out dark while auto exposure settles, so a still
   # is the last of `:frames` frames. gst-launch encodes the frames it has
   # time for and writes the JPEGs back to back on stdout.
@@ -13,7 +15,8 @@ defmodule Fp3Camera.Still do
          {:ok, info} <- Camera.info(camera),
          size = if(opts[:binned], do: info.binned, else: {info.width, info.height}),
          out = output_size(size, opts),
-         :ok <- Pipeline.check_size(info, out) do
+         :ok <- Pipeline.check_size(info, out),
+         :ok <- Pipeline.check_settings(info, out, opts, @options) do
       {jpegs, status} =
         MuonTrap.cmd("gst-launch-1.0", Pipeline.still(info, out, opts),
           env: Pipeline.env(),

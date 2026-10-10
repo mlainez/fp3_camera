@@ -16,6 +16,8 @@ defmodule Fp3Camera.Camera do
     * `:binned` — `{width, height}` of the smallest one, which covers the
       same field of view at a fraction of the pixels
     * `:modes` — every mode the ISP takes, smallest first
+    * `:pixel_array` — `{x, y, width, height}` of the sensor's active
+      pixels
   """
 
   @cci "/proc/device-tree/soc@0/cci@1b0c000"
@@ -89,9 +91,26 @@ defmodule Fp3Camera.Camera do
 
         sorted ->
           {width, height} = List.last(sorted)
-          {:ok, %{width: width, height: height, binned: hd(sorted), modes: sorted}}
+
+          {:ok,
+           %{
+             width: width,
+             height: height,
+             binned: hd(sorted),
+             modes: sorted,
+             pixel_array: pixel_array(dev)
+           }}
       end
     end
+  end
+
+  # The sensor's active pixels {x, y, width, height}, which zoom crops into
+  defp pixel_array(dev) do
+    {out, _} =
+      System.cmd("v4l2-ctl", ["-d", dev, "--get-subdev-selection", "pad=0,target=crop_bounds"])
+
+    [_ | xywh] = Regex.run(~r/Left (\d+), Top (\d+), Width (\d+), Height (\d+)/, out)
+    xywh |> Enum.map(&String.to_integer/1) |> List.to_tuple()
   end
 
   defp list_sizes(dev, code) do

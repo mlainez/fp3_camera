@@ -41,7 +41,7 @@ defmodule Fp3Camera do
   @doc """
   Per-sensor, per-mode capture settings. See `Fp3Camera.Config`.
 
-      Fp3Camera.configure({:rear, :snap}, gamma: 2.0)
+      Fp3Camera.configure({:rear, :snap}, awb: false, wb: {2.0, 1.0, 1.6})
       Fp3Camera.save_config()      # survives the reboot
   """
   defdelegate configure(scope, opts), to: Fp3Camera.Config, as: :put
@@ -63,7 +63,7 @@ defmodule Fp3Camera do
   Merge into the settings applied to every camera and mode. A key set to
   `nil` is cleared. Running streams keep the settings they started with.
 
-      Fp3Camera.set_defaults(gamma: 1.8, saturation: 1.7)
+      Fp3Camera.set_defaults(exposure: 20_000, gain: 2.0)
   """
   @spec set_defaults(keyword()) :: keyword()
   def set_defaults(opts) when is_list(opts) do
@@ -92,6 +92,29 @@ defmodule Fp3Camera do
   """
   @spec info(camera()) :: {:ok, map()} | {:error, term()}
   def info(camera), do: Camera.info(camera)
+
+  @doc """
+  The output sizes `camera` produces: its full and binned modes and the
+  common video sizes it reaches, largest first.
+
+      iex> Fp3Camera.sizes(:rear)
+      {:ok, [{4000, 3000}, {3840, 2160}, {2560, 1440}, {2000, 1500}, ...]}
+  """
+  @spec sizes(camera()) :: {:ok, [{pos_integer(), pos_integer()}]} | {:error, term()}
+  def sizes(camera) do
+    with {:ok, info} <- Camera.info(camera), do: {:ok, Fp3Camera.Pipeline.sizes(info)}
+  end
+
+  @doc """
+  The largest `:zoom` `camera` takes at a `{width, height}` output.
+
+      iex> Fp3Camera.max_zoom(:rear, {1920, 1080})
+      {:ok, 2.08}
+  """
+  @spec max_zoom(camera(), {pos_integer(), pos_integer()}) :: {:ok, float()} | {:error, term()}
+  def max_zoom(camera, size) do
+    with {:ok, info} <- Camera.info(camera), do: {:ok, Fp3Camera.Pipeline.max_zoom(info, size)}
+  end
 
   @doc """
   Capture a still and save it as JPEG at `path`. Returns `{:ok, path}`.

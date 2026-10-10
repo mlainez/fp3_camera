@@ -92,11 +92,21 @@ $ mpv --profile=low-latency tcp://nerves.local:8888
 
 ## Settings
 
-Exposure, gain, white balance and focus (`:exposure`, `:gain`, `:awb`,
-`:wb`, `:focus`) map onto libcamera controls, each automatic or manual
-on its own; `Fp3Camera.Pipeline` lists them. The ISP's tone curve is
-fixed to sRGB, so `:gamma`, `:contrast`, `:saturation`, `:brightness`
-and `:sharpen` are accepted and not applied yet.
+Exposure, gain, white balance, focus and zoom (`:exposure`, `:gain`,
+`:awb`, `:wb`, `:focus`, `:zoom`) map onto libcamera controls, each
+automatic or manual on its own; `Fp3Camera.Pipeline` lists them. Any
+other setting, a value out of range, focus on a fixed-focus camera or a
+zoom beyond `Fp3Camera.max_zoom/2` is refused with the reason.
+
+Zoom is digital: the ISP crops the middle of the sensor's largest mode
+and scales it down to the output, so it reaches about 2x at 1920x1080 on
+the rear cameras and less at larger sizes.
+
+```elixir
+Fp3Camera.sizes(:rear)
+Fp3Camera.max_zoom(:rear, {1920, 1080})
+Fp3Camera.snap(:rear, "/root/zoomed.jpg", width: 1920, height: 1080, zoom: 2.0)
+```
 
 Resolution order, later winning:
 
@@ -106,7 +116,7 @@ Resolution order, later winning:
 4. options passed to the call
 
 ```elixir
-Fp3Camera.configure({:rear, :snap}, gamma: 2.0, saturation: 1.8)
+Fp3Camera.configure({:rear, :snap}, exposure: 20_000, gain: 2.0)
 Fp3Camera.save_config()     # /root/fp3-camera.config, reloaded at boot
 Fp3Camera.reset_config()
 ```
@@ -122,7 +132,7 @@ driver that recovers its firmware when it stops answering.
 
 - One capture per camera at a time; a busy camera returns
   `{:error, :busy}`.
-- No autofocus yet: `focus: :auto` leaves the lens where it is.
+- No autofocus yet: focus is set by hand.
 - Exposure and white balance are measured on the output frames, not by
   the ISP's statistics block.
 - When the Venus firmware stops answering, the kernel restarts it and the
