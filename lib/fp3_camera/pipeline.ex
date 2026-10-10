@@ -82,11 +82,14 @@ defmodule Fp3Camera.Pipeline do
   Environment for gst-launch-1.0 running a pipeline of `out` from `info`:
   the libcamera configuration for its sensor mode, where full-resolution
   outputs get eight debayer threads instead of two. `:encoder` lays NV12
-  frames out for Venus, for stream/3; other pipelines read them packed.
+  frames out for Venus when stream/3 hands them to it unchanged; frames
+  that GStreamer scales first have to stay packed.
   """
   def env(info, out, use \\ :cpu) do
-    mode = if sensor_mode(info, out) == info.binned, do: "binned", else: "full_resolution"
-    config = if use == :encoder, do: mode <> "_encoder", else: mode
+    sensor = sensor_mode(info, out)
+    mode = if sensor == info.binned, do: "binned", else: "full_resolution"
+    direct = nv12_source(sensor, out) == {out, "format=NV12,"}
+    config = if use == :encoder and direct, do: mode <> "_encoder", else: mode
 
     [
       {"XDG_CONFIG_HOME", Application.app_dir(:fp3_camera, "priv/#{config}")},
