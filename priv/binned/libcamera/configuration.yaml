@@ -1,0 +1,9 @@
+%YAML 1.1
+---
+# libcamera configuration for pipelines from a binned sensor mode. camss
+# hands over capture buffers already synced for the CPU, so the software
+# ISP need not sync them again.
+version: 1
+configuration:
+  software_isp:
+    sync_input_buffer: false

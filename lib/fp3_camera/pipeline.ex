@@ -79,14 +79,16 @@ defmodule Fp3Camera.Pipeline do
 
   @doc """
   Environment for gst-launch-1.0 running a pipeline of `out` from `info`:
-  full-resolution outputs get eight debayer threads instead of two.
+  the libcamera configuration for its sensor mode, where full-resolution
+  outputs get eight debayer threads instead of two.
   """
   def env(info, out) do
-    base = [{"LIBCAMERA_LOG_LEVELS", "*:ERROR"}]
+    config = if sensor_mode(info, out) == info.binned, do: "binned", else: "full_resolution"
 
-    if sensor_mode(info, out) == info.binned,
-      do: base,
-      else: [{"XDG_CONFIG_HOME", Application.app_dir(:fp3_camera, "priv/full_resolution")} | base]
+    [
+      {"XDG_CONFIG_HOME", Application.app_dir(:fp3_camera, "priv/#{config}")},
+      {"LIBCAMERA_LOG_LEVELS", "*:ERROR"}
+    ]
   end
 
   # The binned mode unless the output is larger than it.

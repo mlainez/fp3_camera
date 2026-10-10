@@ -63,7 +63,7 @@ defmodule Fp3Camera.Subscriber do
         spawn_link(fn ->
           MuonTrap.cmd("gst-launch-1.0", args,
             into: %Sink{pid: me},
-            env: [{"LIBCAMERA_LOG_LEVELS", "*:ERROR"}]
+            env: Pipeline.env(info, {w, h})
           )
         end)
 

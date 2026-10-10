@@ -16,7 +16,7 @@ defmodule Fp3Camera.Still do
 
       {jpegs, status} =
         MuonTrap.cmd("gst-launch-1.0", Pipeline.still(info, size, out, opts),
-          env: [{"LIBCAMERA_LOG_LEVELS", "*:ERROR"}],
+          env: Pipeline.env(info, size),
           timeout: Keyword.get(opts, :timeout, 60_000)
         )
 
