@@ -42,13 +42,12 @@ crops it to the output's aspect ratio, as Android frames video.
 | -------- | -------------- | ---------------------------- | ---------- |
 | S5KGM1SP | 4000x3000      | 2000x1500, 4000x3000         | 60, 30     |
 | S5K3P9SP | 2304x1728      | 2304x1728                    | 30         |
+| IMX363   | 4032x3024      | 1920x1080, 2016x1512, 4032x3024 | 30      |
+| S5K4H7YX | 3264x2448      | 752x564, 816x612, 1440x1080, 3264x2448 | 30 |
 
 The ISP takes sensor lines of at most 4288 pixels, so the front
 S5K3P9SP's full 4608x3456 mode is out of reach. A frame rate the mode
 cannot run is refused with `{:error, {:unsupported_framerate, ...}}`.
-
-The Fairphone 3 sensors (IMX363, S5K4H7YX) do not stream through the
-ISP yet.
 
 ## Capturing
 
