@@ -45,9 +45,8 @@ defmodule Fp3Camera.Pipeline do
       "controls,video_gop_size=#{Keyword.get(opts, :gop, fps)}," <>
         "video_bitrate=#{Keyword.get(opts, :bitrate, 8_000_000)}"
 
-    # The converter writes to system memory and the encoder copies each
-    # frame into its own buffers: writing the converted frame straight into
-    # those uncached buffers is what limits the stream, to 20 fps or less.
+    # The encoder copies each frame into its own buffers: writing frames
+    # straight into those uncached buffers limits the stream to 20 fps.
     #
     # If Venus stops returning frames, the watchdog fails the pipeline and
     # closing the session restarts the firmware.
@@ -55,13 +54,13 @@ defmodule Fp3Camera.Pipeline do
     # Each IDR frame carries SPS and PPS, so a viewer that joins mid-GOP
     # can decode from the next one. Holding new viewers back until a
     # keyframe (sync-method=*-keyframe) stalls this pipeline.
-    size = framed(info.binned, out)
+    {size, format} = nv12_source(info.binned, out)
 
     # libcamera can run the sensor faster than asked, and the encoder
     # budgets its bitrate for the frame rate it is given.
-    ["-e" | source(info, size, opts, fps)] ++
+    ["-e" | source(info, size, opts, fps, format)] ++
       ["!", "videorate", "drop-only=true", "max-rate=#{fps}"] ++
-      scale(size, out, "format=NV12,") ++
+      to_nv12(size, out, format) ++
       ["!", "identity", "drop-allocation=true"] ++
       ["!", "v4l2h264enc", "extra-controls=#{controls}"] ++
       ~w(! watchdog timeout=4000 ! h264parse config-interval=-1
@@ -70,11 +69,26 @@ defmodule Fp3Camera.Pipeline do
 
   @doc "Raw NV12 frames on stdout."
   def frames(info, out, opts) do
-    size = framed(info.binned, out)
+    {size, format} = nv12_source(info.binned, out)
 
-    source(info, size, opts, Keyword.get(opts, :framerate)) ++
-      scale(size, out, "format=NV12,") ++ ~w(! fdsink fd=1)
+    source(info, size, opts, Keyword.get(opts, :framerate), format) ++
+      to_nv12(size, out, format) ++ ~w(! fdsink fd=1)
   end
+
+  # libcamera debayers straight to NV12 when it crops the output out of the
+  # sensor mode, which saves a conversion pass over every frame. A crop that
+  # would cut more than a twentieth of the framed area is scaled from RGB
+  # instead, to keep the field of view.
+  defp nv12_source(mode, {w, h} = out) do
+    {fw, fh} = framed(mode, out)
+
+    if w <= fw and h <= fh and w * 20 >= fw * 19,
+      do: {out, "format=NV12,"},
+      else: {{fw, fh}, ""}
+  end
+
+  defp to_nv12(size, size, "format=NV12,"), do: []
+  defp to_nv12(size, out, _format), do: scale(size, out, "format=NV12,")
 
   # The part of the sensor mode with the output's aspect ratio: its full
   # width for a wider output, its full height for a taller one.
@@ -84,12 +98,12 @@ defmodule Fp3Camera.Pipeline do
       else: {8 * div(round(mh * w / h), 8), mh}
   end
 
-  defp source(info, {w, h}, opts, fps \\ nil) do
+  defp source(info, {w, h}, opts, fps \\ nil, format \\ "") do
     rate = if fps, do: ",framerate=#{fps}/1", else: ""
 
     # -f: a crash exits instead of waiting for a debugger to attach.
     ["-q", "-f", "libcamerasrc", "camera-name=#{info.id}" | controls(opts)] ++
-      ["!", "video/x-raw,width=#{w},height=#{h}#{rate}"]
+      ["!", "video/x-raw,#{format}width=#{w},height=#{h}#{rate}"]
   end
 
   # Nearest-neighbour keeps up with the sensor; bilinear halves the rate.

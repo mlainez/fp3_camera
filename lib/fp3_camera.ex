@@ -129,13 +129,17 @@ defmodule Fp3Camera do
       mpv    tcp://<device>:<port>
 
   A viewer can connect at any time: every second starts with a keyframe.
+  While a stream runs, the CPUs are held at their top frequency, as
+  Android does while its camera records.
 
   ## Options
 
     * `:port` — TCP port (default `8888` for `:rear`, `8890` for `:front`)
     * `:width`, `:height` — frame size (default `1920×1080`), cropped to
       that aspect ratio and scaled from the binned sensor mode
-    * `:framerate` — frames per second asked of the sensor (default `30`)
+    * `:framerate` — frames per second (default `30`). The front sensor
+      tops out at 30; the rear one reaches about 50 at 1080p and 60 at
+      720p when the light allows a short exposure.
     * `:bitrate` — bits per second (default `8_000_000`)
     * picture settings, see `Fp3Camera.Pipeline`
   """
