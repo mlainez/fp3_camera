@@ -44,7 +44,8 @@ keyframe, so a viewer can connect at any time.
 By default a stream is 1920x1080 at 30 fps and 8 Mbit/s, cropped to 16:9
 from the binned sensor mode as Android frames video. Both cameras hold
 30 fps. The rear camera also streams 1080p at about 50 fps and 720p at
-60 when the light allows a short exposure (`framerate: 60`). While a
+60 when the light allows a short exposure (`framerate: 60`), and
+3840x2160 at about 17 fps, where the encoder runs at its top clock. While a
 stream runs the CPUs are held at their top frequency, as Android does
 while its camera records; a 1080p stream at 30 fps keeps about a fifth
 to a third of the eight cores busy.

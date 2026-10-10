@@ -54,7 +54,7 @@ defmodule Fp3Camera.Pipeline do
     # Each IDR frame carries SPS and PPS, so a viewer that joins mid-GOP
     # can decode from the next one. Holding new viewers back until a
     # keyframe (sync-method=*-keyframe) stalls this pipeline.
-    {size, format} = nv12_source(info.binned, out)
+    {size, format} = nv12_source(sensor_mode(info, out), out)
 
     # libcamera can run the sensor faster than asked, and the encoder
     # budgets its bitrate for the frame rate it is given.
@@ -69,10 +69,27 @@ defmodule Fp3Camera.Pipeline do
 
   @doc "Raw NV12 frames on stdout."
   def frames(info, out, opts) do
-    {size, format} = nv12_source(info.binned, out)
+    {size, format} = nv12_source(sensor_mode(info, out), out)
 
     source(info, size, opts, Keyword.get(opts, :framerate), format) ++
       to_nv12(size, out, format) ++ ~w(! fdsink fd=1)
+  end
+
+  @doc """
+  Environment for gst-launch-1.0 running a pipeline of `out` from `info`:
+  full-resolution outputs get four debayer threads instead of two.
+  """
+  def env(info, out) do
+    base = [{"LIBCAMERA_LOG_LEVELS", "*:ERROR"}]
+
+    if sensor_mode(info, out) == info.binned,
+      do: base,
+      else: [{"XDG_CONFIG_HOME", Application.app_dir(:fp3_camera, "priv/full_resolution")} | base]
+  end
+
+  # The binned mode unless the output is larger than it.
+  defp sensor_mode(%{binned: {bw, bh}} = info, {w, h}) do
+    if w <= bw and h <= bh, do: {bw, bh}, else: {info.width, info.height}
   end
 
   # libcamera debayers straight to NV12 when it crops the output out of the

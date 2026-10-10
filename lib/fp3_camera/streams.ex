@@ -38,7 +38,14 @@ defmodule Fp3Camera.Streams do
          {:ok, info} <- Camera.info(camera) do
       ref = make_ref()
       out = {Keyword.get(opts, :width, 1920), Keyword.get(opts, :height, 1080)}
-      stream = %{camera: camera, port: opts[:port], args: Pipeline.stream(info, out, opts)}
+
+      stream = %{
+        camera: camera,
+        port: opts[:port],
+        args: Pipeline.stream(info, out, opts),
+        env: Pipeline.env(info, out)
+      }
+
       state = state |> launch(ref, Map.put(stream, :restarts, 0)) |> hold_cpu_speed()
       {:reply, {:ok, ref}, state}
     else
@@ -127,7 +134,7 @@ defmodule Fp3Camera.Streams do
          [
            "gst-launch-1.0",
            stream.args,
-           [env: [{"LIBCAMERA_LOG_LEVELS", "*:ERROR"}], stderr_to_stdout: true, log_output: :info]
+           [env: stream.env, stderr_to_stdout: true, log_output: :info]
          ]}
     }
 

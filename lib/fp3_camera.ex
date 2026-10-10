@@ -139,7 +139,8 @@ defmodule Fp3Camera do
       that aspect ratio and scaled from the binned sensor mode
     * `:framerate` — frames per second (default `30`). The front sensor
       tops out at 30; the rear one reaches about 50 at 1080p and 60 at
-      720p when the light allows a short exposure.
+      720p when the light allows a short exposure, and 17 at 3840×2160,
+      where the encoder is at its top clock.
     * `:bitrate` — bits per second (default `8_000_000`)
     * picture settings, see `Fp3Camera.Pipeline`
   """

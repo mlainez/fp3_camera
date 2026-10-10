@@ -1,0 +1,9 @@
+%YAML 1.1
+---
+# libcamera configuration for full-resolution streams: the software ISP
+# needs four debayer threads to keep up with 4K. Binned streams run faster
+# with libcamera's default of two.
+version: 1
+configuration:
+  software_isp:
+    threads: 4
