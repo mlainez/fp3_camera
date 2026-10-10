@@ -134,6 +134,11 @@ defmodule Fp3Camera.PipelineTest do
                Pipeline.check_settings(@rear, {1920, 1080}, [gain: 40], [])
     end
 
+    test "explains that there is no autofocus" do
+      assert {:error, {:bad_setting, :focus, "there is no autofocus: set 0 to 1023"}} =
+               Pipeline.check_settings(@rear, {1920, 1080}, [focus: :auto], [])
+    end
+
     test "refuses focus on a fixed-focus camera" do
       assert {:error, {:bad_setting, :focus, "this camera has a fixed-focus lens"}} =
                Pipeline.check_settings(@front, {1920, 1080}, [focus: 300], [])

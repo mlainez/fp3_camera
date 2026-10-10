@@ -106,6 +106,7 @@ defmodule Fp3Camera.Pipeline do
 
   defp check_setting(%{lens: nil}, _out, :focus, _, _), do: "this camera has a fixed-focus lens"
   defp check_setting(_info, _out, :focus, n, _) when n in 0..1023, do: :ok
+  defp check_setting(_info, _out, :focus, :auto, _), do: "there is no autofocus: set 0 to 1023"
 
   defp check_setting(info, out, :zoom, z, _) when is_number(z) and z >= 1 do
     max = max_zoom(info, out)
