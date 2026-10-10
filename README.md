@@ -44,12 +44,11 @@ keyframe, so a viewer can connect at any time.
 By default a stream is 1920x1080 at 30 fps and 8 Mbit/s, cropped to 16:9
 from the binned sensor mode as Android frames video. Both cameras hold
 30 fps, and the rear camera also streams 1080p at 60 fps
-(`framerate: 60`) and 3840x2160 at about 27 fps, close to the 28.7 its
-full-resolution mode reaches. The sensor runs at the stream's frame
-rate, which also bounds the exposure time. While a stream runs the CPUs
-are held at their top frequency, as Android does while its camera
-records; a 1080p stream at 30 fps keeps 13 to 20% of the eight cores
-busy, 4K about 60%.
+(`framerate: 60`) and 3840x2160 at 30 fps. The sensor runs at the
+stream's frame rate, which also bounds the exposure time. While a stream
+runs the CPUs are held at their top frequency, as Android does while its
+camera records; a 1080p stream at 30 fps keeps 13 to 20% of the eight
+cores busy, 4K about 60%.
 
 ```elixir
 {:ok, ref} = Fp3Camera.start_stream(:rear, width: 1280, height: 960, bitrate: 4_000_000)
@@ -94,8 +93,8 @@ recovers its firmware when it stops answering.
 - The sensors are not calibrated for libcamera yet, so colours are off.
 - One capture per camera at a time; a busy camera returns
   `{:error, :busy}`.
-- Demosaicing runs on the CPU, which keeps up with the binned modes and
-  nearly with full resolution.
+- Demosaicing runs on the CPU, which keeps up with the sensors up to 4K
+  at 30 fps.
 - Exposure, gain and white balance are automatic: the software ISP
   ignores `:exposure`, `:gain`, `:awb`, `:wb`, `:brightness`,
   `:sharpen` and `:focus` for now.

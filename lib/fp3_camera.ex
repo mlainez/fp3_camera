@@ -139,8 +139,7 @@ defmodule Fp3Camera do
       that aspect ratio and scaled from the binned sensor mode
     * `:framerate` — frames per second (default `30`). The sensor runs
       at this rate, which also bounds the exposure. The front sensor tops
-      out at 30; the rear one reaches 60 at 1080p and about 27 at
-      3840×2160, close to its 28.7 at full resolution.
+      out at 30; the rear one reaches 60 at 1080p and 30 at 3840×2160.
     * `:bitrate` — bits per second (default `8_000_000`)
     * picture settings, see `Fp3Camera.Pipeline`
   """
