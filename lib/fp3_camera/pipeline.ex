@@ -4,7 +4,9 @@ defmodule Fp3Camera.Pipeline do
 
   Every pipeline starts at libcamerasrc, whose software ISP turns the raw
   Bayer frames into RGB on the CPU. Smaller outputs are scaled from a full
-  sensor mode, because libcamera crops rather than scales.
+  sensor mode, because libcamera crops rather than scales. An output with
+  another aspect ratio than the sensor mode, such as 16:9 from a 4:3
+  sensor, is cropped to that ratio first, as Android frames video.
 
   ## Picture settings
 
@@ -39,8 +41,9 @@ defmodule Fp3Camera.Pipeline do
   def stream(info, out, opts) do
     fps = Keyword.get(opts, :framerate, 30)
 
-    # No bitrate: Venus ignores the target here, and a low one stalls it.
-    controls = "controls,video_gop_size=#{Keyword.get(opts, :gop, fps)}"
+    controls =
+      "controls,video_gop_size=#{Keyword.get(opts, :gop, fps)}," <>
+        "video_bitrate=#{Keyword.get(opts, :bitrate, 8_000_000)}"
 
     # The converter writes to system memory and the encoder copies each
     # frame into its own buffers: writing the converted frame straight into
@@ -52,8 +55,13 @@ defmodule Fp3Camera.Pipeline do
     # Each IDR frame carries SPS and PPS, so a viewer that joins mid-GOP
     # can decode from the next one. Holding new viewers back until a
     # keyframe (sync-method=*-keyframe) stalls this pipeline.
-    ["-e" | source(info, info.binned, opts, fps)] ++
-      scale(info.binned, out, "format=NV12,") ++
+    size = framed(info.binned, out)
+
+    # libcamera can run the sensor faster than asked, and the encoder
+    # budgets its bitrate for the frame rate it is given.
+    ["-e" | source(info, size, opts, fps)] ++
+      ["!", "videorate", "drop-only=true", "max-rate=#{fps}"] ++
+      scale(size, out, "format=NV12,") ++
       ["!", "identity", "drop-allocation=true"] ++
       ["!", "v4l2h264enc", "extra-controls=#{controls}"] ++
       ~w(! watchdog timeout=4000 ! h264parse config-interval=-1
@@ -62,8 +70,18 @@ defmodule Fp3Camera.Pipeline do
 
   @doc "Raw NV12 frames on stdout."
   def frames(info, out, opts) do
-    source(info, info.binned, opts, Keyword.get(opts, :framerate)) ++
-      scale(info.binned, out, "format=NV12,") ++ ~w(! fdsink fd=1)
+    size = framed(info.binned, out)
+
+    source(info, size, opts, Keyword.get(opts, :framerate)) ++
+      scale(size, out, "format=NV12,") ++ ~w(! fdsink fd=1)
+  end
+
+  # The part of the sensor mode with the output's aspect ratio: its full
+  # width for a wider output, its full height for a taller one.
+  defp framed({mw, mh}, {w, h}) do
+    if mw * h <= mh * w,
+      do: {mw, 2 * div(round(mw * h / w), 2)},
+      else: {8 * div(round(mh * w / h), 8), mh}
   end
 
   defp source(info, {w, h}, opts, fps \\ nil) do

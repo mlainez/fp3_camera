@@ -41,8 +41,13 @@ Streams are **raw H.264 over TCP**, not HTTP, so a browser cannot open
 them. Rear listens on 8888, front on 8890. Every second starts with a
 keyframe, so a viewer can connect at any time.
 
+By default a stream is 1920x1080 at 30 fps and 8 Mbit/s, cropped to 16:9
+from the binned sensor mode as Android frames video. Both cameras hold
+30 fps; a 1080p stream keeps about 45% of the eight cores busy, mostly
+debayering.
+
 ```elixir
-{:ok, ref} = Fp3Camera.start_stream(:rear, width: 1280, height: 960)
+{:ok, ref} = Fp3Camera.start_stream(:rear, width: 1280, height: 960, bitrate: 4_000_000)
 Fp3Camera.streams()
 Fp3Camera.stop_stream(ref)
 ```
@@ -88,8 +93,6 @@ recovers its firmware when it stops answering.
   30 fps; full resolution is for stills.
 - When the Venus firmware stops answering, the kernel restarts it and the
   stream starts again on its own a few seconds later.
-- Venus does not honour a bitrate target yet, so streams run at 20 to
-  40 Mbit/s.
 
 ## License
 

@@ -37,7 +37,7 @@ defmodule Fp3Camera.Streams do
     with :ok <- idle(state, camera),
          {:ok, info} <- Camera.info(camera) do
       ref = make_ref()
-      out = {Keyword.get(opts, :width, 1280), Keyword.get(opts, :height, 960)}
+      out = {Keyword.get(opts, :width, 1920), Keyword.get(opts, :height, 1080)}
       stream = %{camera: camera, port: opts[:port], args: Pipeline.stream(info, out, opts)}
       {:reply, {:ok, ref}, launch(state, ref, Map.put(stream, :restarts, 0))}
     else

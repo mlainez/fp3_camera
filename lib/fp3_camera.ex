@@ -133,9 +133,10 @@ defmodule Fp3Camera do
   ## Options
 
     * `:port` — TCP port (default `8888` for `:rear`, `8890` for `:front`)
-    * `:width`, `:height` — frame size (default `1280×960`), scaled from
-      the binned sensor mode
+    * `:width`, `:height` — frame size (default `1920×1080`), cropped to
+      that aspect ratio and scaled from the binned sensor mode
     * `:framerate` — frames per second asked of the sensor (default `30`)
+    * `:bitrate` — bits per second (default `8_000_000`)
     * picture settings, see `Fp3Camera.Pipeline`
   """
   @spec start_stream(camera(), keyword()) :: {:ok, reference()} | {:error, term()}
@@ -169,7 +170,7 @@ defmodule Fp3Camera do
 
   Returns `{:ok, pid}`. Pass the pid to `unsubscribe/1`, or let the
   calling process exit. Takes the options of `start_stream/2` except
-  `:port`.
+  `:port` and `:bitrate`; the size defaults to `1280×960`.
   """
   @spec subscribe(camera(), keyword()) :: {:ok, pid()} | {:error, term()}
   def subscribe(camera, opts \\ []) do
