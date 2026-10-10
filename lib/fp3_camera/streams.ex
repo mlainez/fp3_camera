@@ -43,7 +43,7 @@ defmodule Fp3Camera.Streams do
         camera: camera,
         port: opts[:port],
         args: Pipeline.stream(info, out, opts),
-        env: Pipeline.env(info, out)
+        env: Pipeline.env(info, out, :encoder)
       }
 
       state = state |> launch(ref, Map.put(stream, :restarts, 0)) |> hold_cpu_speed()

@@ -47,8 +47,10 @@ defmodule Fp3Camera.Pipeline do
       "controls,video_gop_size=#{Keyword.get(opts, :gop, fps)}," <>
         "video_bitrate=#{Keyword.get(opts, :bitrate, 8_000_000)}"
 
-    # The encoder copies each frame into its own buffers: writing frames
-    # straight into those uncached buffers limits the stream to 20 fps.
+    # Venus encodes libcamera's NV12 frames in place, laid out for it by
+    # env/3. Scaled frames are copied into the encoder's own buffers
+    # instead: writing them straight into those uncached buffers limits
+    # the stream to 20 fps.
     #
     # If Venus stops returning frames, the watchdog fails the pipeline and
     # closing the session restarts the firmware.
@@ -63,8 +65,8 @@ defmodule Fp3Camera.Pipeline do
     ["-e" | source(info, size, opts, fps, format)] ++
       ["!", "videorate", "drop-only=true", "max-rate=#{fps}"] ++
       to_nv12(size, out, format) ++
-      ["!", "identity", "drop-allocation=true"] ++
-      ["!", "v4l2h264enc", "extra-controls=#{controls}"] ++
+      encoder(size, out, format) ++
+      ["extra-controls=#{controls}"] ++
       ~w(! watchdog timeout=4000 ! h264parse config-interval=-1
          ! tcpserversink host=0.0.0.0 port=#{Keyword.fetch!(opts, :port)} sync=false)
   end
@@ -80,10 +82,12 @@ defmodule Fp3Camera.Pipeline do
   @doc """
   Environment for gst-launch-1.0 running a pipeline of `out` from `info`:
   the libcamera configuration for its sensor mode, where full-resolution
-  outputs get eight debayer threads instead of two.
+  outputs get eight debayer threads instead of two. `:encoder` lays NV12
+  frames out for Venus, for stream/3; other pipelines read them packed.
   """
-  def env(info, out) do
-    config = if sensor_mode(info, out) == info.binned, do: "binned", else: "full_resolution"
+  def env(info, out, use \\ :cpu) do
+    mode = if sensor_mode(info, out) == info.binned, do: "binned", else: "full_resolution"
+    config = if use == :encoder, do: mode <> "_encoder", else: mode
 
     [
       {"XDG_CONFIG_HOME", Application.app_dir(:fp3_camera, "priv/#{config}")},
@@ -107,6 +111,9 @@ defmodule Fp3Camera.Pipeline do
       do: {out, "format=NV12,"},
       else: {{fw, fh}, ""}
   end
+
+  defp encoder(size, size, "format=NV12,"), do: ~w(! v4l2h264enc output-io-mode=dmabuf-import)
+  defp encoder(_size, _out, _format), do: ~w(! identity drop-allocation=true ! v4l2h264enc)
 
   defp to_nv12(size, size, "format=NV12,"), do: []
   defp to_nv12(size, out, _format), do: scale(size, out, "format=NV12,")
