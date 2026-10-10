@@ -2,9 +2,11 @@ defmodule Fp3Camera do
   @moduledoc """
   Stills and live video from the Fairphone 3 and 3+ rear and front cameras.
 
-  Frames come from libcamera, whose software ISP turns the sensors' raw
-  Bayer data into RGB on the CPU; streams are encoded to H.264 by the
-  Venus hardware encoder. Everything runs as `gst-launch-1.0` pipelines.
+  Frames come from libcamera, whose camss pipeline handler runs them
+  through the camera ISP; streams are encoded to H.264 by the Venus
+  hardware encoder. Everything runs as `gst-launch-1.0` pipelines.
+  `Fp3Camera.Pipeline` documents the sizes and frame rates each camera
+  takes.
 
   Two slots are supported, `:rear` and `:front`. What is *in* them is
   not fixed: the modules are user-replaceable and the Fairphone 3+ kit
@@ -79,15 +81,14 @@ defmodule Fp3Camera do
 
   @doc """
   Which sensor is fitted in `camera` and the frame sizes it gives:
-  `:sensor`, `:lens` (or `nil`), `:width` and `:height` at full
-  resolution, `:binned` as `{width, height}` and libcamera's `:id`.
-
-  The first call per camera opens it for about a second to read the
-  sizes; later calls are free.
+  `:sensor`, `:lens` (or `nil`), `:width` and `:height` of the largest
+  output, `:binned` as `{width, height}`, the sensor `:modes` the ISP
+  takes and libcamera's `:id`.
 
       iex> Fp3Camera.info(:rear)
       {:ok, %{camera: :rear, sensor: "s5kgm1sp", lens: "dw9800w",
-              width: 3992, height: 3000, binned: {1992, 1500}, id: "/base/..."}}
+              width: 4000, height: 3000, binned: {2000, 1500},
+              modes: [{2000, 1500}, {4000, 3000}], id: "/base/..."}}
   """
   @spec info(camera()) :: {:ok, map()} | {:error, term()}
   def info(camera), do: Camera.info(camera)
@@ -99,11 +100,11 @@ defmodule Fp3Camera do
 
     * `:binned` — use the sensor's binned mode: the same field of view at
       a quarter of the pixels, much faster (default `false`)
-    * `:width`, `:height` — scale to this size; giving one keeps the
-      aspect ratio
+    * `:width`, `:height` — output size; giving one keeps the aspect
+      ratio. See `Fp3Camera.Pipeline` for the sizes the ISP produces.
     * `:quality` — JPEG quality, 1..100 (default `90`)
     * `:frames` — frames to let auto exposure settle before the one
-      that is kept (default `30`)
+      that is kept (default `10`)
     * picture settings, see `Fp3Camera.Pipeline`
   """
   @spec snap(camera(), Path.t(), keyword()) :: {:ok, Path.t()} | {:error, term()}
@@ -129,17 +130,15 @@ defmodule Fp3Camera do
       mpv    tcp://<device>:<port>
 
   A viewer can connect at any time: every second starts with a keyframe.
-  While a stream runs, the CPUs are held at their top frequency, as
-  Android does while its camera records.
 
   ## Options
 
     * `:port` — TCP port (default `8888` for `:rear`, `8890` for `:front`)
-    * `:width`, `:height` — frame size (default `1920×1080`), cropped to
-      that aspect ratio and scaled from the binned sensor mode
+    * `:width`, `:height` — frame size (default `1920×1080`), scaled
+      from the sensor mode and cropped to that aspect ratio by the ISP
     * `:framerate` — frames per second (default `30`). The sensor runs
       at this rate, which also bounds the exposure. The front sensor tops
-      out at 30; the rear one reaches 60 at 1080p and 30 at 3840×2160.
+      out at 30; the rear one reaches 60 up to 2000×1500 and 30 above.
     * `:bitrate` — bits per second (default `8_000_000`)
     * picture settings, see `Fp3Camera.Pipeline`
   """

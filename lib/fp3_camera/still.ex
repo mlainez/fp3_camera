@@ -10,13 +10,13 @@ defmodule Fp3Camera.Still do
     opts = Config.resolve(camera, :snap, opts)
 
     with :ok <- Streams.ensure_idle(camera),
-         {:ok, info} <- Camera.info(camera) do
-      size = if opts[:binned], do: info.binned, else: {info.width, info.height}
-      out = output_size(size, opts)
-
+         {:ok, info} <- Camera.info(camera),
+         size = if(opts[:binned], do: info.binned, else: {info.width, info.height}),
+         out = output_size(size, opts),
+         :ok <- Pipeline.check_size(info, out) do
       {jpegs, status} =
-        MuonTrap.cmd("gst-launch-1.0", Pipeline.still(info, size, out, opts),
-          env: Pipeline.env(info, size),
+        MuonTrap.cmd("gst-launch-1.0", Pipeline.still(info, out, opts),
+          env: Pipeline.env(),
           timeout: Keyword.get(opts, :timeout, 60_000)
         )
 
@@ -34,17 +34,18 @@ defmodule Fp3Camera.Still do
     end
   end
 
-  # Only `:width` given keeps the aspect ratio; NV12 and JPEG want even sizes.
+  # One side given keeps the aspect ratio: the width it derives is rounded
+  # to the 16 pixels the ISP writes, the height to an even number.
   defp output_size({w, h}, opts) do
     case {opts[:width], opts[:height]} do
       {nil, nil} -> {w, h}
-      {ow, nil} -> {even(ow), even(ow * h / w)}
-      {nil, oh} -> {even(oh * w / h), even(oh)}
-      {ow, oh} -> {even(ow), even(oh)}
+      {ow, nil} -> {ow, even(ow * h / w)}
+      {nil, oh} -> {16 * round(oh * w / h / 16), oh}
+      {ow, oh} -> {ow, oh}
     end
   end
 
-  defp even(x), do: 2 * div(round(x), 2)
+  defp even(x), do: 2 * round(x / 2)
 
   # The last complete one: a timeout can cut the final JPEG short.
   defp last_jpeg(data) do

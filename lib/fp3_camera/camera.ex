@@ -1,23 +1,28 @@
 defmodule Fp3Camera.Camera do
   @moduledoc """
-  Which sensor sits in each slot, and the frame sizes libcamera gives it.
+  Which sensor sits in each slot, and the frame sizes it gives.
 
   The slots are fixed by the board: the rear camera hangs off CCI bus 0
   and the front one off CCI bus 1. What is fitted in them is not, so the
   sensor model comes from the device tree, which the kernel completes at
   boot with the parts it detected.
 
-  libcamera's software ISP trims a few pixels from each sensor mode, so
-  the sizes it accepts are not the sensor's own. They are read once per
-  boot from libcamera's log and cached:
+  The camera ISP takes sensor lines of at most 4288 pixels, so a mode
+  wider than that, such as the front S5K3P9SP's full 4608x3456, is out of
+  reach and that camera tops out at its binned mode. The sizes, read once
+  per boot from the sensor's V4L2 subdevice:
 
-    * `:width`, `:height` — the full-resolution mode
-    * `:binned` — `{width, height}` of the smallest mode, which covers the
-      same field of view at a fraction of the cost
+    * `:width`, `:height` — the largest mode the ISP takes
+    * `:binned` — `{width, height}` of the smallest one, which covers the
+      same field of view at a fraction of the pixels
+    * `:modes` — every mode the ISP takes, smallest first
   """
 
   @cci "/proc/device-tree/soc@0/cci@1b0c000"
   @buses %{rear: 0, front: 1}
+
+  # Widest sensor line the VFE pixel path takes
+  @max_line 4288
 
   @type camera :: :rear | :front
 
@@ -41,21 +46,21 @@ defmodule Fp3Camera.Camera do
     end
   end
 
-  @doc "`sensor/1` plus the frame sizes, probing libcamera on first use."
+  @doc "`sensor/1` plus the frame sizes."
   @spec info(camera()) :: {:ok, map()} | {:error, term()}
   def info(camera) do
     with {:ok, sensor} <- sensor(camera),
-         {:ok, sizes} <- sizes(sensor.id) do
+         {:ok, sizes} <- sizes(sensor.sensor) do
       {:ok, Map.merge(sensor, sizes)}
     end
   end
 
-  defp sizes(id) do
-    key = {__MODULE__, id}
+  defp sizes(model) do
+    key = {__MODULE__, model}
 
     case :persistent_term.get(key, nil) do
       nil ->
-        with {:ok, sizes} <- probe(id) do
+        with {:ok, sizes} <- probe(model) do
           :persistent_term.put(key, sizes)
           {:ok, sizes}
         end
@@ -65,35 +70,41 @@ defmodule Fp3Camera.Camera do
     end
   end
 
-  # Configuring the camera for a tiny frame makes libcamera log every mode
-  # it considered, as "Picked <raw> ... for max processed stream size <out>".
-  defp probe(id) do
-    args = ~w(-q libcamerasrc camera-name=#{id} ! video/x-raw,width=320,height=240
-              ! identity eos-after=1 ! fakesink)
+  defp probe(model) do
+    with {:ok, dev} <- subdev(model) do
+      {codes, _} = System.cmd("v4l2-ctl", ["-d", dev, "--list-subdev-mbus-codes", "pad=0"])
 
-    {log, _status} =
-      MuonTrap.cmd("gst-launch-1.0", args,
-        env: [{"LIBCAMERA_LOG_LEVELS", "SimplePipeline:DEBUG"}],
-        stderr_to_stdout: true,
-        timeout: 20_000
-      )
+      modes =
+        for [_, code] <- Regex.scan(~r/(0x[0-9a-f]+):/, codes),
+            {sizes, 0} <- [list_sizes(dev, code)],
+            [_, w, h] <- Regex.scan(~r/Size Range: (\d+)x(\d+)/, sizes),
+            {w, h} = {String.to_integer(w), String.to_integer(h)},
+            w <= @max_line,
+            uniq: true,
+            do: {w, h}
 
-    picks =
-      for [_, rw, rh, pw, ph] <-
-            Regex.scan(
-              ~r/Picked (\d+)x(\d+)-\S+ -> \S+ for max processed stream size (\d+)x(\d+)/,
-              log
-            ) do
-        {{int(rw), int(rh)}, {int(pw), int(ph)}}
+      case Enum.sort_by(modes, fn {w, h} -> w * h end) do
+        [] ->
+          {:error, {:no_isp_mode, model}}
+
+        sorted ->
+          {width, height} = List.last(sorted)
+          {:ok, %{width: width, height: height, binned: hd(sorted), modes: sorted}}
       end
+    end
+  end
 
-    case Enum.max_by(picks, fn {_raw, {w, h}} -> w * h end, fn -> nil end) do
-      nil ->
-        {:error, {:probe_failed, String.slice(log, -500, 500)}}
+  defp list_sizes(dev, code) do
+    System.cmd("v4l2-ctl", ["-d", dev, "--list-subdev-framesizes", "pad=0,code=#{code}"])
+  end
 
-      {{fw, fh}, {width, height}} ->
-        {{bw, bh}, _} = Enum.min_by(picks, fn {{w, h}, _} -> w * h end)
-        {:ok, %{width: width, height: height, binned: {bw - (fw - width), bh - (fh - height)}}}
+  # The sensor's subdevice, named "<model> <i2c bus>-<address>".
+  defp subdev(model) do
+    Path.wildcard("/sys/class/video4linux/v4l-subdev*")
+    |> Enum.find(fn path -> match?({:ok, ^model <> " " <> _}, File.read("#{path}/name")) end)
+    |> case do
+      nil -> {:error, {:no_subdev, model}}
+      path -> {:ok, "/dev/" <> Path.basename(path)}
     end
   end
 
@@ -119,6 +130,4 @@ defmodule Fp3Camera.Camera do
       {:error, _} -> true
     end
   end
-
-  defp int(s), do: String.to_integer(s)
 end

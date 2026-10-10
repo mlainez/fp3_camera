@@ -8,10 +8,13 @@ Stills and live H.264 from the Fairphone 3 and 3+ cameras, on
 {:ok, ref}  = Fp3Camera.start_stream(:rear)
 ```
 
-Frames come from [libcamera](https://libcamera.org), whose software ISP
-turns the sensors' raw Bayer data into RGB, and streams are encoded to
-H.264 by the Venus hardware encoder. Each capture is a `gst-launch-1.0`
-pipeline run under [MuonTrap](https://hex.pm/packages/muontrap).
+Frames come from [libcamera](https://libcamera.org) through its camss
+pipeline handler: the camera ISP debayers, white balances, colour and
+gamma corrects, scales and crops each frame in hardware and hands out
+NV12. Streams are encoded to H.264 by the Venus hardware encoder. Each
+capture is a `gst-launch-1.0` pipeline run under
+[MuonTrap](https://hex.pm/packages/muontrap), so any GStreamer, V4L2 or
+libcamera tool, Membrane or Evision can use the cameras the same way.
 
 ## Two phones, four sensors
 
@@ -23,8 +26,29 @@ different sensors in the same slots, so a phone can carry any mix:
 | Rear  | Sony IMX363, 12MP     | Samsung S5KGM1SP, 12MP |
 | Front | Samsung S5K4H7YX, 8MP | Samsung S5K3P9SP, 16MP |
 
-`Fp3Camera.info/1` reports the fitted sensor and the frame sizes
-libcamera gives it, read from the device tree and from libcamera.
+`Fp3Camera.info/1` reports the fitted sensor and the sizes it gives,
+read from the device tree and the sensor's V4L2 subdevice.
+
+## Sizes and frame rates
+
+An output is at most the camera's largest mode and at least a sixteenth
+of it each way, the ISP's largest downscale. Its width is a multiple of
+16 and its height even. Anything else is refused with
+`{:error, {:unsupported_size, size, reason}}`. The sensor runs the
+smallest mode that covers the output, and the ISP scales it down and
+crops it to the output's aspect ratio, as Android frames video.
+
+| Sensor   | Largest output | Modes the ISP takes          | Frame rate |
+| -------- | -------------- | ---------------------------- | ---------- |
+| S5KGM1SP | 4000x3000      | 2000x1500, 4000x3000         | 60, 30     |
+| S5K3P9SP | 2304x1728      | 2304x1728                    | 30         |
+
+The ISP takes sensor lines of at most 4288 pixels, so the front
+S5K3P9SP's full 4608x3456 mode is out of reach. A frame rate the mode
+cannot run is refused with `{:error, {:unsupported_framerate, ...}}`.
+
+The Fairphone 3 sensors (IMX363, S5K4H7YX) do not stream through the
+ISP yet.
 
 ## Capturing
 
@@ -35,20 +59,20 @@ Fp3Camera.snap(:rear, "/root/photo.jpg", binned: true, quality: 95)
 ```
 
 `binned: true` uses the sensor's smaller mode: the same field of view at
-a quarter of the pixels, and much faster.
+a quarter of the pixels. A still takes about 0.9 s binned and 1.2 s at
+12MP from a cold start, most of it the sensor starting up and auto
+exposure settling.
 
 Streams are **raw H.264 over TCP**, not HTTP, so a browser cannot open
 them. Rear listens on 8888, front on 8890. Every second starts with a
 keyframe, so a viewer can connect at any time.
 
-By default a stream is 1920x1080 at 30 fps and 8 Mbit/s, cropped to 16:9
-from the binned sensor mode as Android frames video. Both cameras hold
-30 fps, and the rear camera also streams 1080p at 60 fps
+By default a stream is 1920x1080 at 30 fps and 8 Mbit/s. Both cameras
+hold 30 fps; the rear one also streams 1080p at 60 fps
 (`framerate: 60`) and 3840x2160 at 30 fps. The sensor runs at the
-stream's frame rate, which also bounds the exposure time. While a stream
-runs the CPUs are held at their top frequency, as Android does while its
-camera records; a 1080p stream at 30 fps keeps 13 to 20% of the eight
-cores busy, 4K about 60%.
+stream's frame rate, which also bounds the exposure time. A 1080p
+stream at 30 fps keeps about 12% of the eight cores busy, 4K at 30 fps
+or 1080p at 60 about 18%, most of it copying frames into the encoder.
 
 ```elixir
 {:ok, ref} = Fp3Camera.start_stream(:rear, width: 1280, height: 960, bitrate: 4_000_000)
@@ -65,9 +89,11 @@ $ mpv --profile=low-latency tcp://nerves.local:8888
 
 ## Settings
 
-Picture settings (`:gamma`, `:contrast`, `:saturation`, `:brightness`,
-`:sharpen`, `:awb`, `:wb`, `:exposure`, `:gain`, `:focus`) map onto
-libcamera controls; `Fp3Camera.Pipeline` lists them.
+Exposure, gain, white balance and focus (`:exposure`, `:gain`, `:awb`,
+`:wb`, `:focus`) map onto libcamera controls, each automatic or manual
+on its own; `Fp3Camera.Pipeline` lists them. The ISP's tone curve is
+fixed to sRGB, so `:gamma`, `:contrast`, `:saturation`, `:brightness`
+and `:sharpen` are accepted and not applied yet.
 
 Resolution order, later winning:
 
@@ -84,19 +110,18 @@ Fp3Camera.reset_config()
 
 ## What this needs from the system
 
-GStreamer with libcamera's `libcamerasrc`, `v4l2h264enc`, `jpegenc`,
-`videoconvertscale` and `tcpserversink`, and a kernel whose Venus driver
-recovers its firmware when it stops answering.
+nerves_system_fp3 with libcamera's camss pipeline handler and IPA, and
+GStreamer with `libcamerasrc`, `v4l2h264enc`, `jpegenc` and
+`tcpserversink`. The kernel needs the camss Bayer pixel path and a Venus
+driver that recovers its firmware when it stops answering.
 
 ## Known limits
 
-- The sensors are not calibrated for libcamera yet, so colours are off.
 - One capture per camera at a time; a busy camera returns
   `{:error, :busy}`.
-- Demosaicing runs on the CPU, which keeps up with the sensors up to 4K
-  at 30 fps.
-- The software ISP ignores `:brightness`, `:sharpen` and `:focus` for
-  now.
+- No autofocus yet: `focus: :auto` leaves the lens where it is.
+- Exposure and white balance are measured on the output frames, not by
+  the ISP's statistics block.
 - When the Venus firmware stops answering, the kernel restarts it and the
   stream starts again on its own a few seconds later.
 

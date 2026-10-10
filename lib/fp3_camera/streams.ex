@@ -27,27 +27,29 @@ defmodule Fp3Camera.Streams do
   def claim(camera, pid), do: GenServer.call(__MODULE__, {:claim, camera, pid})
 
   @impl true
-  def init(nil), do: {:ok, %{streams: %{}, claims: %{}, cpu_floor: nil}}
+  def init(nil), do: {:ok, %{streams: %{}, claims: %{}}}
 
   @impl true
   def handle_call({:start, camera, opts}, _from, state) do
     opts = Config.resolve(camera, :stream, opts)
     opts = Keyword.put_new(opts, :port, @default_ports[camera])
 
+    out = {Keyword.get(opts, :width, 1920), Keyword.get(opts, :height, 1080)}
+
     with :ok <- idle(state, camera),
-         {:ok, info} <- Camera.info(camera) do
+         {:ok, info} <- Camera.info(camera),
+         :ok <- Pipeline.check_size(info, out),
+         :ok <- Pipeline.check_framerate(info, out, Keyword.get(opts, :framerate, 30)) do
       ref = make_ref()
-      out = {Keyword.get(opts, :width, 1920), Keyword.get(opts, :height, 1080)}
 
       stream = %{
         camera: camera,
         port: opts[:port],
         args: Pipeline.stream(info, out, opts),
-        env: Pipeline.env(info, out, :encoder)
+        restarts: 0
       }
 
-      state = state |> launch(ref, Map.put(stream, :restarts, 0)) |> hold_cpu_speed()
-      {:reply, {:ok, ref}, state}
+      {:reply, {:ok, ref}, launch(state, ref, stream)}
     else
       error -> {:reply, error, state}
     end
@@ -60,7 +62,7 @@ defmodule Fp3Camera.Streams do
 
       {stream, streams} ->
         shutdown(stream)
-        {:reply, :ok, release_cpu_speed(%{state | streams: streams})}
+        {:reply, :ok, %{state | streams: streams}}
     end
   end
 
@@ -101,7 +103,7 @@ defmodule Fp3Camera.Streams do
             "fp3_camera: #{stream.camera} stream exited (#{inspect(reason)}), giving up"
           )
 
-          {:noreply, release_cpu_speed(%{state | streams: Map.delete(state.streams, ref)})}
+          {:noreply, %{state | streams: Map.delete(state.streams, ref)}}
         end
 
       nil ->
@@ -134,7 +136,7 @@ defmodule Fp3Camera.Streams do
          [
            "gst-launch-1.0",
            stream.args,
-           [env: stream.env, stderr_to_stdout: true, log_output: :info]
+           [env: Pipeline.env(), stderr_to_stdout: true, log_output: :info]
          ]}
     }
 
@@ -149,34 +151,6 @@ defmodule Fp3Camera.Streams do
 
     put_in(state.streams[ref], stream)
   end
-
-  # The debayer threads work in bursts, one per frame, and fall behind when
-  # the governor lowers the clocks between them, as Android's camera
-  # avoids by holding the CPUs at speed while it records. Raise each
-  # cluster's floor to its top frequency while a stream runs.
-  @cpufreq "/sys/devices/system/cpu/cpufreq"
-
-  defp hold_cpu_speed(%{cpu_floor: nil} = state) do
-    floors =
-      for policy <- Path.wildcard("#{@cpufreq}/policy*"),
-          {:ok, floor} <- [File.read("#{policy}/scaling_min_freq")],
-          {:ok, top} <- [File.read("#{policy}/cpuinfo_max_freq")],
-          :ok <- [File.write("#{policy}/scaling_min_freq", top)],
-          into: %{},
-          do: {policy, floor}
-
-    %{state | cpu_floor: floors}
-  end
-
-  defp hold_cpu_speed(state), do: state
-
-  defp release_cpu_speed(%{streams: streams, cpu_floor: floors} = state)
-       when map_size(streams) == 0 and is_map(floors) do
-    for {policy, floor} <- floors, do: File.write("#{policy}/scaling_min_freq", floor)
-    %{state | cpu_floor: nil}
-  end
-
-  defp release_cpu_speed(state), do: state
 
   # gst-launch -e turns SIGINT into end-of-stream, which closes the Venus
   # session properly; a session killed mid-frame can wedge the firmware.

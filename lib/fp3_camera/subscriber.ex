@@ -53,6 +53,8 @@ defmodule Fp3Camera.Subscriber do
     {w, h} = {Keyword.get(opts, :width, 1280), Keyword.get(opts, :height, 960)}
 
     with {:ok, info} <- Camera.info(camera),
+         :ok <- Pipeline.check_size(info, {w, h}),
+         :ok <- check_framerate(info, {w, h}, opts[:framerate]),
          :ok <- Streams.claim(camera, self()) do
       Process.flag(:trap_exit, true)
       Process.monitor(subscriber)
@@ -63,7 +65,7 @@ defmodule Fp3Camera.Subscriber do
         spawn_link(fn ->
           MuonTrap.cmd("gst-launch-1.0", args,
             into: %Sink{pid: me},
-            env: Pipeline.env(info, {w, h})
+            env: Pipeline.env()
           )
         end)
 
@@ -99,6 +101,10 @@ defmodule Fp3Camera.Subscriber do
   # Killing the task closes MuonTrap's port, which stops gst-launch.
   @impl true
   def terminate(_reason, state), do: Process.exit(state.task, :kill)
+
+  # Without a frame rate the camera runs at its default
+  defp check_framerate(_info, _out, nil), do: :ok
+  defp check_framerate(info, out, fps), do: Pipeline.check_framerate(info, out, fps)
 
   defp chop(bin, size, acc) when byte_size(bin) >= size do
     <<frame::binary-size(^size), rest::binary>> = bin
